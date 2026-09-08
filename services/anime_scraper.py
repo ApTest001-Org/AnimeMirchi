@@ -1,41 +1,42 @@
 """
-Anime Metadata Scraper Service
-Fetches and verifies Hindi-dubbed anime information directly from official sources.
+Anime metadata scraper.
 
 Sources:
-- Official OTT platforms: Crunchyroll, Netflix, Amazon Prime Video,
-  JioHotstar, Amazon MX Player, ZEE5, SonyLIV
-- Prime Video Channel / YouTube: Anime Times (@animetimesindia)
-- Official YouTube channels: Muse India (@MuseIndiaChannel),
-  Ani-One India (@AniOneIN)
-- Neutral Metadata: Jikan/MyAnimeList
-  (Poster, Studio, Canonical Title only)
+- AnimeDubHindi:
+    Hindi Dub status
+    Season
+    Episode
+    Languages
+    Schedule
+    Release Date
+    Explicit Dub By / platform tags
+    Old/completed and ongoing anime posts
+
+- Official streaming / official YouTube pages:
+    Platform
+    Explicitly listed audio language
+    Season information when publicly visible
+    Dub By / official channel information when explicitly visible
+
+- Jikan / MyAnimeList:
+    Anime title
+    Poster
+    Animation studio
+    Total episode count
 
 Important:
-- No anime episodes are downloaded or distributed.
-- Only publicly available metadata is processed.
-- Search engines are used ONLY for discovery.
-- Availability is considered verified ONLY after direct official-source
-  page validation.
+- No anime episodes are downloaded.
+- No watch/download links are returned.
+- Only metadata is processed.
+- Source displayed to users is only "DC".
 """
 
 import html
-import json
 import re
-import time
-from concurrent.futures import (
-    ThreadPoolExecutor,
-    as_completed,
-    TimeoutError as FutureTimeoutError,
-)
-from typing import Dict, List, Optional, Set
-from urllib.parse import (
-    parse_qs,
-    quote,
-    unquote,
-    urljoin,
-    urlparse,
-)
+from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional
+from urllib.parse import quote, unquote, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -44,32 +45,14 @@ from utils.logger import logger
 
 
 # =====================================================================
-# CONFIGURATION
+# URLS
 # =====================================================================
 
+SITE_URL = "https://www.animedubhindi.link/"
+SCHEDULE_URL = f"{SITE_URL}schedule.php"
+ANIME_MIRCHI_URL = "https://animemirchi.com/"
 JIKAN_URL = "https://api.jikan.moe/v4/anime"
-
-OVERALL_TIMEOUT_SECONDS = 8.0
-DISCOVERY_TIMEOUT_SECONDS = 2.0
-PAGE_TIMEOUT_SECONDS = 2.0
-MAX_CANDIDATES_PER_SOURCE = 3
-
-SUPPORTED_LANGUAGES = [
-    "Hindi",
-    "English",
-    "Tamil",
-    "Telugu",
-    "Japanese",
-]
-
-LANGUAGE_TITLE_CLEAN_RE = re.compile(
-    r"\b("
-    r"hindi|english|tamil|telugu|japanese|malayalam|"
-    r"bangla|bengali|kannada|chinese|korean|marathi|"
-    r"multi\s+audio|dual\s+audio|multi\s+language"
-    r")\b",
-    re.I,
-)
+JIKAN_API_BASE = "https://api.jikan.moe/v4"
 
 
 # =====================================================================
@@ -77,121 +60,121 @@ LANGUAGE_TITLE_CLEAN_RE = re.compile(
 # =====================================================================
 
 OFFICIAL_SOURCES = {
-    "Crunchyroll": {
-        "domains": [
-            "crunchyroll.com",
-        ],
-        "search_site": "crunchyroll.com",
-        "youtube_handles": [],
-    },
-
-    "Netflix": {
-        "domains": [
-            "netflix.com",
-        ],
-        "search_site": "netflix.com",
-        "youtube_handles": [],
-    },
-
-    "Amazon Prime Video": {
-        "domains": [
-            "primevideo.com",
-        ],
-        "search_site": "primevideo.com",
-        "youtube_handles": [],
-    },
-
-    "JioHotstar": {
-        "domains": [
-            "hotstar.com",
-            "jiohotstar.com",
-        ],
-        "search_site": "hotstar.com",
-        "youtube_handles": [],
-    },
-
-    "Amazon MX Player": {
-        "domains": [
-            "mxplayer.in",
-        ],
-        "search_site": "mxplayer.in",
-        "youtube_handles": [],
-    },
-
-    "ZEE5": {
-        "domains": [
-            "zee5.com",
-        ],
-        "search_site": "zee5.com",
-        "youtube_handles": [],
-    },
-
-    "SonyLIV": {
-        "domains": [
-            "sonyliv.com",
-        ],
-        "search_site": "sonyliv.com",
-        "youtube_handles": [],
-    },
-
-    "Anime Times": {
-        "domains": [
-            "youtube.com",
-            "animetimes.co.jp",
-        ],
-        "search_site": "youtube.com",
-        "youtube_handles": [
-            "animetimesindia",
-        ],
-    },
-
-    "Muse India": {
-        "domains": [
-            "youtube.com",
-            "museindia.in",
-        ],
-        "search_site": "youtube.com",
-        "youtube_handles": [
-            "MuseIndiaChannel",
-        ],
-    },
-
-    "Ani-One India": {
-        "domains": [
-            "youtube.com",
-            "ani-one.com",
-        ],
-        "search_site": "youtube.com",
-        "youtube_handles": [
-            "AniOneIN",
-        ],
-    },
+    "Crunchyroll": [
+        "crunchyroll.com",
+    ],
+    "Netflix": [
+        "netflix.com",
+    ],
+    "JioHotstar": [
+        "hotstar.com",
+        "jiohotstar.com",
+    ],
+    "Amazon Prime Video": [
+        "primevideo.com",
+        "amazon.com",
+    ],
+    "Sony YAY! / SonyLIV": [
+        "sonyliv.com",
+    ],
+    "Amazon MX Player": [
+        "mxplayer.in",
+    ],
+    "ZEE5": [
+        "zee5.com",
+    ],
+    "Muse India": [
+        "youtube.com",
+        "museindia.in",
+    ],
+    "Ani-One India": [
+        "youtube.com",
+        "ani-one.com",
+    ],
+    "Anime Times": [
+        "youtube.com",
+        "animetimes.co.jp",
+    ],
 }
 
 
 # =====================================================================
-# SCRAPER
+# PLATFORM TAGS FOUND ON ANIME DUB HINDI
 # =====================================================================
 
-class AnimeScraper:
-    """Multi-source anime metadata scraper."""
+PLATFORM_TAGS = {
+    "cr dub": "Crunchyroll",
+    "crunchyroll dub": "Crunchyroll",
+    "crunchyroll": "Crunchyroll",
+    "cr": "Crunchyroll",
 
-    def __init__(self):
+    "nf dub": "Netflix",
+    "netflix dub": "Netflix",
+    "netflix": "Netflix",
+    "nf": "Netflix",
+
+    "amzn dub": "Amazon Prime Video",
+    "amazon prime video": "Amazon Prime Video",
+    "prime video": "Amazon Prime Video",
+    "amzn": "Amazon Prime Video",
+
+    "hotstar": "JioHotstar",
+    "jiohotstar": "JioHotstar",
+    "jio hotstar": "JioHotstar",
+
+    "sony yay": "Sony YAY",
+    "sony liv": "Sony LIV",
+
+    "mx player": "MX Player",
+
+    "muse dub": "Muse India",
+    "muse india": "Muse India",
+
+    "anime times": "Anime Times",
+    "anime time": "Anime Times",
+
+    "ani-one": "Ani-One",
+    "ani one": "Ani-One",
+}
+
+
+# =====================================================================
+# LANGUAGE NAMES
+# =====================================================================
+
+LANGUAGES = [
+    "Hindi",
+    "English",
+    "Tamil",
+    "Telugu",
+    "Japanese",
+]
+
+
+class AnimeScraper:
+    """Live anime information lookup service."""
+
+    # =================================================================
+    # INIT
+    # =================================================================
+
+    def __init__(self) -> None:
+
         self.session = requests.Session()
 
-        self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 14) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/131.0 Mobile Safari/537.36"
-            ),
-            "Accept-Language": "en-IN,en;q=0.9",
-            "Accept": (
-                "text/html,application/xhtml+xml,"
-                "application/xml;q=0.9,*/*;q=0.8"
-            ),
-        })
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Linux; Android 14) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/131.0 "
+                    "Mobile Safari/537.36"
+                ),
+                "Accept-Language": (
+                    "en-IN,en;q=0.9"
+                ),
+            }
+        )
 
     # =================================================================
     # MAIN SEARCH
@@ -201,2437 +184,2054 @@ class AnimeScraper:
         self,
         anime_name: str,
     ) -> Optional[Dict]:
+        """
+        Resolve an anime from a short/friendly name, then verify Hindi
+        dub/platform information from official sources in parallel.
 
-        anime_name = (
-            anime_name or ""
-        ).strip()
+        Official sources are authoritative for platform/audio claims.
+        AnimeDubHindi and AnimeMirchi are fallback cross-check sources
+        only when the official checks cannot establish the information.
+        """
 
+        anime_name = (anime_name or "").strip()
         if not anime_name:
-            logger.warning(
-                "Empty anime name provided"
-            )
             return None
 
-        query = self._normalize(
-            anime_name
-        )
+        query = self._normalize(anime_name)
+        logger.info("Anime search started: %s", anime_name)
 
-        is_movie_query = bool(
-            re.search(
-                r"\b(movie|film|theatrical)\b",
-                anime_name,
-                re.I,
-            )
-        )
+        # Resolve the title and fetch fallback sources concurrently.
+        # MAL/Jikan is also what prevents a short query such as
+        # "re zero" from requiring the complete official title.
+        def fetch_mal():
+            return AnimeScraper()._get_mal_info(anime_name)
 
-        logger.info(
-            "Anime search started across "
-            "10 official sources: %s",
-            anime_name,
-        )
+        def fetch_animedubhindi():
+            return AnimeScraper()._find_animedubhindi(anime_name, query)
 
-        official_results: Dict[str, Dict] = {}
-        mal_info: Optional[Dict] = None
+        def fetch_mirchi():
+            return AnimeScraper()._search_anime_mirchi(anime_name, query)
 
-        executor = ThreadPoolExecutor(
-            max_workers=11,
-            thread_name_prefix="anime-source",
-        )
+        mal = None
+        fallback_dh = None
+        mirchi = None
 
-        futures = {}
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="anime-base") as executor:
+            futures = {
+                executor.submit(fetch_mal): "mal",
+                executor.submit(fetch_animedubhindi): "animedubhindi",
+                executor.submit(fetch_mirchi): "animemirchi",
+            }
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    value = future.result()
+                    if name == "mal":
+                        mal = value
+                    elif name == "animedubhindi":
+                        fallback_dh = value
+                    else:
+                        mirchi = value
+                except Exception as exc:
+                    logger.debug("%s lookup failed: %s", name, exc)
 
-        try:
-            # ---------------------------------------------------------
-            # Jikan
-            # ---------------------------------------------------------
+        # The anime itself is considered found if MAL/Jikan or either
+        # fallback metadata source identified a matching title.
+        if not mal and not fallback_dh and not mirchi:
+            logger.info("Anime not found: %s", anime_name)
+            return None
 
-            mal_future = executor.submit(
-                self._get_mal_info,
-                anime_name,
-                is_movie_query,
-            )
+        result = {
+            "name": (
+                mal.get("name") if mal else
+                fallback_dh.get("name") if fallback_dh else
+                mirchi.get("name") if mirchi else anime_name
+            ),
+            "hindi_dub": "Not Verified",
+            "platform": None,
+            "platform_entries": [],
+            "dub_by": None,
+            "studio": mal.get("studio") if mal else None,
+            "hindi_details": None,
+            "season": fallback_dh.get("season") if fallback_dh else None,
+            "episodes": fallback_dh.get("episodes") if fallback_dh else None,
+            "languages": fallback_dh.get("languages") if fallback_dh else None,
+            "schedule": fallback_dh.get("schedule") if fallback_dh else None,
+            "release_date": fallback_dh.get("release_date") if fallback_dh else None,
+            "status": mal.get("status") if mal else None,
+            "airing": mal.get("airing") if mal else None,
+            "total_episodes": mal.get("total_episodes") if mal else None,
+            "aired_episodes": mal.get("aired_episodes") if mal else None,
+            "last_episode": mal.get("last_episode") if mal else None,
+            "last_episode_date": mal.get("last_episode_date") if mal else None,
+            "next_episode": mal.get("next_episode") if mal else None,
+            "next_episode_date": mal.get("next_episode_date") if mal else None,
+            "broadcast": mal.get("broadcast") if mal else None,
+            "poster_url": mal.get("poster_url") if mal else None,
+            "mal_url": mal.get("mal_url") if mal else None,
+            "source": "DC",
+            "source_link": None,
+            "verification_level": "unverified",
+        }
 
-            futures[mal_future] = "mal"
+        # Keep richer fallback metadata available, but never let it claim
+        # that a platform is official before the official verification step.
+        if fallback_dh:
+            for key in (
+                "season", "episodes", "languages", "schedule",
+                "release_date", "studio", "hindi_details",
+            ):
+                if not result.get(key) and fallback_dh.get(key):
+                    result[key] = fallback_dh[key]
 
-            # ---------------------------------------------------------
-            # Official sources
-            # ---------------------------------------------------------
+        if mirchi:
+            result["fallback_mirchi"] = mirchi
 
-            for (
-                platform_name,
-                platform_cfg,
-            ) in OFFICIAL_SOURCES.items():
+        # IMPORTANT: all official platforms are checked concurrently.
+        official = self._check_official_sources(anime_name)
+        official_entries = official.get("platform_entries", [])
 
-                future = executor.submit(
-                    self._verify_single_official_platform,
-                    platform_name,
-                    platform_cfg,
-                    anime_name,
-                    query,
-                    is_movie_query,
-                )
-
-                futures[future] = (
-                    f"platform:{platform_name}"
-                )
-
-            # ---------------------------------------------------------
-            # HARD COLLECTION DEADLINE
-            # ---------------------------------------------------------
-
-            deadline = (
-                time.monotonic()
-                + OVERALL_TIMEOUT_SECONDS
-            )
-
-            try:
-                for future in as_completed(
-                    futures,
-                    timeout=OVERALL_TIMEOUT_SECONDS,
-                ):
-
-                    if time.monotonic() >= deadline:
-                        break
-
-                    task_key = futures[future]
-
-                    try:
-                        result = future.result(
-                            timeout=max(
-                                0.01,
-                                deadline
-                                - time.monotonic(),
-                            )
-                        )
-
-                        if not result:
-                            continue
-
-                        if task_key == "mal":
-                            mal_info = result
-
-                        elif task_key.startswith(
-                            "platform:"
-                        ):
-                            platform_name = (
-                                task_key.split(
-                                    ":",
-                                    1,
-                                )[1]
-                            )
-
-                            if result.get(
-                                "verified"
-                            ):
-                                official_results[
-                                    platform_name
-                                ] = result
-
-                    except Exception as exc:
-                        logger.debug(
-                            "%s failed: %s",
-                            task_key,
-                            exc,
-                        )
-
-            except FutureTimeoutError:
-                logger.warning(
-                    "Official-source search reached "
-                    "%ss deadline.",
-                    OVERALL_TIMEOUT_SECONDS,
-                )
-
-        finally:
-            executor.shutdown(
-                wait=False,
-                cancel_futures=True,
-            )
-
-        # -------------------------------------------------------------
-        # Merge ONLY verified official results
-        # -------------------------------------------------------------
-
-        final_result = self._merge_results(
-            official_results,
-            mal_info,
-            anime_name,
-            is_movie_query,
-        )
-
-        if final_result:
-            logger.info(
-                "Verified anime: %s",
-                final_result.get("name"),
-            )
+        if official_entries:
+            result["platform_entries"] = self._dedupe_platform_entries(official_entries)
+            result["platform"] = " • ".join(dict.fromkeys(
+                entry.get("platform")
+                for entry in result["platform_entries"]
+                if entry.get("platform")
+            )) or None
+            result["hindi_dub"] = "Available" if any(
+                "Hindi" in entry.get("languages", [])
+                for entry in result["platform_entries"]
+            ) else "Not Verified"
+            result["dub_by"] = official.get("dub_by")
+            result["verification_level"] = "official"
         else:
-            logger.info(
-                "Anime not verified: %s",
-                anime_name,
-            )
+            # No clear official evidence: use the two requested fallback
+            # databases as cross-checks. Their data is useful, but it is
+            # explicitly kept separate internally from official evidence.
+            fallback_entries = []
+            fallback_dub_by = []
 
-        return final_result
+            if fallback_dh:
+                fallback_entries.extend(fallback_dh.get("platform_entries", []))
+                if fallback_dh.get("dub_by"):
+                    fallback_dub_by.append(fallback_dh["dub_by"])
+
+            if mirchi:
+                fallback_entries.extend(mirchi.get("platform_entries", []))
+                if mirchi.get("dub_by"):
+                    fallback_dub_by.append(mirchi["dub_by"])
+
+            fallback_entries = self._dedupe_platform_entries(fallback_entries)
+            if fallback_entries:
+                result["platform_entries"] = fallback_entries
+                result["platform"] = " • ".join(dict.fromkeys(
+                    entry.get("platform")
+                    for entry in fallback_entries
+                    if entry.get("platform")
+                )) or None
+
+                hindi_found = any(
+                    "Hindi" in entry.get("languages", [])
+                    for entry in fallback_entries
+                )
+                if hindi_found or (mirchi and mirchi.get("hindi_dub")) or (fallback_dh and fallback_dh.get("hindi_dub") == "Available"):
+                    result["hindi_dub"] = "Available"
+
+                if fallback_dub_by:
+                    result["dub_by"] = " • ".join(dict.fromkeys(fallback_dub_by))
+
+                result["verification_level"] = "fallback"
+
+        # Always expose DC to the bot user, regardless of the internal
+        # verification path.
+        result["source"] = "DC"
+        result["source_link"] = None
+
+        # Movies must not inherit a series episode/season count.
+        combined_name = str(result.get("name") or anime_name)
+        if self._is_movie_result(combined_name, result.get("hindi_details")):
+            result["season"] = None
+            result["episodes"] = None
+            result["total_episodes"] = None
+            result["aired_episodes"] = None
+            result["last_episode"] = None
+            result["next_episode"] = None
+
+        return result
 
     # =================================================================
-    # OFFICIAL SOURCE VERIFICATION
+    # ANIMEDUBHINDI SEARCH
     # =================================================================
 
-    def _verify_single_official_platform(
+    def _find_animedubhindi(
         self,
-        platform_name: str,
-        platform_cfg: Dict,
         anime_name: str,
         query: str,
-        is_movie_query: bool,
     ) -> Optional[Dict]:
 
-        started = time.monotonic()
+        # -------------------------------------------------------------
+        # Current schedule
+        # -------------------------------------------------------------
+
+        schedule_result = self._search_schedule(
+            query
+        )
+
+        if schedule_result:
+            return schedule_result
+
+        # -------------------------------------------------------------
+        # Site search
+        # -------------------------------------------------------------
+
+        search_result = self._search_site_search(
+            anime_name,
+            query
+        )
+
+        if search_result:
+            return search_result
+
+        # -------------------------------------------------------------
+        # Search engine fallback restricted to the site.
+        # This helps with old/completed posts.
+        # -------------------------------------------------------------
+
+        engine_result = self._search_engine_for_site(
+            anime_name,
+            query
+        )
+
+        if engine_result:
+            return engine_result
+
+        return None
+
+    # =================================================================
+    # SCHEDULE
+    # =================================================================
+
+    def _search_schedule(
+        self,
+        query: str,
+    ) -> Optional[Dict]:
 
         try:
-            # ---------------------------------------------------------
-            # STEP 1: DISCOVERY
-            # ---------------------------------------------------------
 
-            candidate_urls = (
-                self._discover_candidate_urls(
-                    platform_name,
-                    platform_cfg,
-                    anime_name,
-                )
+            response = self.session.get(
+                SCHEDULE_URL,
+                timeout=20
             )
 
-            if not candidate_urls:
+            response.raise_for_status()
+
+            soup = BeautifulSoup(
+                response.text,
+                "html.parser"
+              
+            )
+
+            return self._parse_matching_page(
+                soup,
+                query,
+                SCHEDULE_URL
+            )
+
+        except Exception as exc:
+
+            logger.warning(
+                "Schedule search failed: %s",
+                exc
+            )
+
+            return None
+
+    # =================================================================
+    # WORDPRESS SITE SEARCH
+    # =================================================================
+
+    def _search_site_search(
+        self,
+        anime_name: str,
+        query: str,
+    ) -> Optional[Dict]:
+
+        search_url = (
+            SITE_URL
+            + "?s="
+            + quote(anime_name)
+        )
+
+        try:
+
+            response = self.session.get(
+                search_url,
+                timeout=20,
+                allow_redirects=True
+            )
+
+            if response.status_code != 200:
                 return None
 
+            soup = BeautifulSoup(
+                response.text,
+                "html.parser"
+            )
+
             # ---------------------------------------------------------
-            # STEP 2: DIRECT OFFICIAL VERIFICATION
+            # DO NOT treat page title like:
+            # "Search Results for: Naruto"
+            # as the anime itself.
             # ---------------------------------------------------------
 
-            for candidate_url in candidate_urls[
-                :MAX_CANDIDATES_PER_SOURCE
-            ]:
+            candidates = []
 
-                if (
-                    time.monotonic() - started
-                    >= OVERALL_TIMEOUT_SECONDS
-                ):
-                    break
+            for link in soup.find_all(
+                "a",
+                href=True
+            ):
 
-                # -----------------------------------------------------
-                # HOSTNAME CHECK BEFORE REQUEST
-                # -----------------------------------------------------
+                title = link.get_text(
+                    " ",
+                    strip=True
+                )
 
-                if not self._is_allowed_domain(
-                    candidate_url,
-                    platform_cfg["domains"],
+                href = link.get(
+                    "href"
+                )
+
+                if not title or not href:
+                    continue
+
+                if len(title) > 300:
+                    continue
+
+                if self._is_generic_title(
+                    title
                 ):
                     continue
 
-                # -----------------------------------------------------
-                # YOUTUBE SPECIAL VERIFICATION
-                # -----------------------------------------------------
-
-                if platform_cfg.get(
-                    "youtube_handles"
+                if not self._title_matches(
+                    title,
+                    query
                 ):
-                    result = (
-                        self._verify_youtube_candidate(
-                            platform_name,
-                            platform_cfg,
-                            candidate_url,
-                            anime_name,
-                            query,
-                            is_movie_query,
-                        )
-                    )
+                    continue
 
-                else:
-                    result = (
-                        self._verify_standard_candidate(
-                            platform_name,
-                            platform_cfg,
-                            candidate_url,
-                            anime_name,
-                            query,
-                            is_movie_query,
-                        )
+                full_url = urljoin(
+                    SITE_URL,
+                    href
+                )
+
+                if not full_url.startswith(
+                    SITE_URL
+                ):
+                    continue
+
+                candidates.append(
+                    (
+                        title,
+                        full_url
                     )
+                )
+
+            # ---------------------------------------------------------
+            # Try article pages.
+            # ---------------------------------------------------------
+
+            seen = set()
+
+            for fallback_title, article_url in (
+                candidates
+            ):
+
+                if article_url in seen:
+                    continue
+
+                seen.add(
+                    article_url
+                )
+
+                result = self._parse_detail_page(
+                    article_url,
+                    fallback_title,
+                    query
+                )
 
                 if result:
                     return result
 
         except Exception as exc:
-            logger.debug(
-                "%s verification failed: %s",
-                platform_name,
-                exc,
+
+            logger.warning(
+                "AnimeDubHindi search failed: %s",
+                exc
             )
 
         return None
-        
+
     # =================================================================
-    # DISCOVERY
+    # SEARCH ENGINE FALLBACK
     # =================================================================
 
-    def _discover_candidate_urls(
+    def _search_engine_for_site(
         self,
-        platform_name: str,
-        platform_cfg: Dict,
         anime_name: str,
-    ) -> List[str]:
-
-        search_site = platform_cfg.get(
-            "search_site",
-            "",
-        )
-
-        # -------------------------------------------------------------
-        # YouTube:
-        # Search specifically for the official channel handle.
-        # -------------------------------------------------------------
-
-        if platform_cfg.get(
-            "youtube_handles"
-        ):
-
-            handles = platform_cfg[
-                "youtube_handles"
-            ]
-
-            handle_queries = []
-
-            for handle in handles:
-                handle_queries.append(
-                    f'"{anime_name}" '
-                    f'site:youtube.com '
-                    f'"@{handle}"'
-                )
-
-            search_query = " OR ".join(
-                handle_queries
-            )
-
-        else:
-            search_query = (
-                f"site:{search_site} "
-                f'"{anime_name}"'
-            )
+        query: str,
+    ) -> Optional[Dict]:
 
         search_url = (
-            "https://html.duckduckgo.com/html/"
-            "?q="
-            + quote(search_query)
+            "https://html.duckduckgo.com/html/?q="
+            + quote(
+                f"site:animedubhindi.link "
+                f'"{anime_name}"'
+            )
+        )
+
+        try:
+
+            response = self.session.get(
+                search_url,
+                timeout=15
+            )
+
+            response.raise_for_status()
+
+            soup = BeautifulSoup(
+                response.text,
+                "html.parser"
+            )
+
+            for result in soup.select(
+                ".result"
+            ):
+
+                anchor = result.select_one(
+                    ".result__a"
+                )
+
+                if not anchor:
+                    continue
+
+                href = anchor.get(
+                    "href"
+                )
+
+                if not href:
+                    continue
+
+                href = unquote(
+                    href
+                )
+
+                if not href.startswith(
+                    "http"
+                ):
+                    continue
+
+                if "animedubhindi.link" not in (
+                    href.lower()
+                ):
+                    continue
+
+                title = anchor.get_text(
+                    " ",
+                    strip=True
+                )
+
+                if not self._title_matches(
+                    title,
+                    query
+                ):
+                    # Look at result snippet too.
+                    snippet_tag = (
+                        result.select_one(
+                            ".result__snippet"
+                        )
+                    )
+
+                    snippet = (
+                        snippet_tag.get_text(
+                            " ",
+                            strip=True
+                        )
+                        if snippet_tag
+                        else ""
+                    )
+
+                    if not self._title_matches(
+                        snippet,
+                        query
+                    ):
+                        continue
+
+                parsed = self._parse_detail_page(
+                    href,
+                    title,
+                    query
+                )
+
+                if parsed:
+                    return parsed
+
+        except Exception as exc:
+
+            logger.debug(
+                "Search engine fallback failed: %s",
+                exc
+            )
+
+        return None
+
+    # =================================================================
+    # PARSE MATCHING PAGE
+    # =================================================================
+
+    def _parse_matching_page(
+        self,
+        soup: BeautifulSoup,
+        query: str,
+        page_url: str,
+    ) -> Optional[Dict]:
+
+        elements = soup.find_all(
+            [
+                "h1",
+                "h2",
+                "h3",
+                "h4",
+                "h5",
+                "a",
+            ]
+        )
+
+        best = None
+        best_score = -1
+
+        for element in elements:
+
+            title = element.get_text(
+                " ",
+                strip=True
+            )
+
+            if not title:
+                continue
+
+            if len(title) > 300:
+                continue
+
+            if self._is_generic_title(
+                title
+            ):
+                continue
+
+            if not self._title_matches(
+                title,
+                query
+            ):
+                continue
+
+            container = element
+            text = title
+
+            for _ in range(8):
+
+                if container.parent is None:
+                    break
+
+                container = container.parent
+
+                candidate = (
+                    container.get_text(
+                        " ",
+                        strip=True
+                    )
+                )
+
+                if (
+                    20
+                    <= len(candidate)
+                    <= 5000
+                ):
+                    text = candidate
+
+                if re.search(
+                    r"\bHindi\b",
+                    candidate,
+                    re.I
+                ):
+                    break
+
+            score = 0
+
+            if re.search(
+                r"\bHindi\b",
+                text,
+                re.I
+            ):
+                score += 50
+
+            if self._extract_season(
+                text
+            ):
+                score += 20
+
+            if self._extract_episode(
+                text
+            ):
+                score += 20
+
+            if self._extract_schedule(
+                text
+            ):
+                score += 10
+
+            if (
+                self._extract_platform_tag(
+                    text
+                )
+            ):
+                score += 15
+
+            if score > best_score:
+
+                best_score = score
+
+                best = (
+                    element,
+                    title,
+                    text
+                )
+
+        if not best:
+            return None
+
+        element, title, text = best
+
+        href = element.get(
+            "href"
+        )
+
+        detail_url = None
+
+        if href:
+
+            full = urljoin(
+                SITE_URL,
+                href
+            )
+
+            if full.startswith(
+                SITE_URL
+            ):
+                detail_url = full
+
+        return self._build_result(
+            title,
+            text,
+            detail_url
+        )
+
+    # =================================================================
+    # PARSE DETAIL PAGE
+    # =================================================================
+
+    def _parse_detail_page(
+        self,
+        url: str,
+        fallback_title: str,
+        query: str,
+    ) -> Optional[Dict]:
+
+        try:
+
+            response = self.session.get(
+                url,
+                timeout=20
+            )
+
+            if response.status_code != 200:
+                return None
+
+            soup = BeautifulSoup(
+                response.text,
+                "html.parser"
+            )
+
+            for tag in soup.find_all(
+                [
+                    "script",
+                    "style",
+                    "noscript",
+                ]
+            ):
+                tag.decompose()
+  
+            title = self._pick_title(
+                soup,
+                fallback_title
+            )
+
+            page_text = soup.get_text(
+                " ",
+                strip=True
+            )
+
+            # Search page titles and generic headings are never
+            # accepted as anime names.
+            if self._is_generic_title(
+                title
+            ):
+                title = fallback_title
+
+            if (
+                not self._title_matches(
+                    title,
+                    query
+                )
+                and not self._title_matches(
+                    page_text[:12000],
+                    query
+                )
+            ):
+                return None
+
+            result = self._build_result(
+                title,
+                page_text,
+                url
+            )
+
+            # Use source page's OG image only as temporary fallback.
+            if not result.get(
+                "poster_url"
+            ):
+                result["poster_url"] = (
+                    self._extract_og_image(
+                        soup
+                    )
+                )
+
+            return result
+
+        except Exception as exc:
+
+            logger.debug(
+                "Detail page parsing failed: %s",
+                exc
+            )
+
+            return None
+
+    # =================================================================
+    # BUILD RESULT
+    # =================================================================
+
+    def _build_result(
+        self,
+        title: str,
+        text: str,
+        detail_url: Optional[str],
+    ) -> Dict:
+
+        languages = (
+            self._extract_languages(
+                text
+            )
+        )
+
+        return {
+            "name": self._clean_title(
+                title
+            ),
+
+            "hindi_dub": (
+                "Available"
+                if "Hindi" in languages
+                else "Not Mentioned"
+            ),
+
+            "platform": (
+                self._extract_platform_tag(
+                    text
+                )
+            ),
+
+            "platform_entries": (
+                self._entries_from_source(
+                    text,
+                    languages
+                )
+            ),
+
+            "dub_by": (
+                self._extract_dub_by(
+                    text
+                )
+            ),
+
+            "studio": (
+                self._extract_studio(text)
+            ),
+
+            "hindi_details": None,
+
+            "season": (
+                self._extract_season(
+                    text
+                )
+            ),
+
+            "episodes": (
+                self._extract_episode(
+                    text
+                )
+            ),
+
+            "languages": (
+                self._languages_string(
+                    languages
+                )
+            ),
+
+            "schedule": (
+                self._extract_schedule(
+                    text
+                )
+            ),
+
+            "release_date": (
+                self._extract_date(
+                    text
+                )
+            ),
+
+            "poster_url": None,
+
+            "mal_url": None,
+
+            "source": "DC",
+
+            "source_link": None,
+
+            "_detail_url": detail_url,
+        }
+    # =================================================================
+    # SOURCE PLATFORM TAG
+    # =================================================================
+
+    @staticmethod
+    def _extract_platform_tag(
+        text: str,
+    ) -> Optional[str]:
+
+        low = (
+            text or ""
+        ).lower()
+
+        found = []
+
+        for alias, platform in sorted(
+            PLATFORM_TAGS.items(),
+            key=lambda item: len(
+                item[0]
+            ),
+            reverse=True
+        ):
+
+            if re.search(
+                rf"\b{re.escape(alias)}\b",
+                low,
+                re.I
+            ):
+
+                found.append(
+                    platform
+                )
+
+        if not found:
+            return None
+
+        return " • ".join(
+            dict.fromkeys(
+                found
+            )
+        )
+
+    # =================================================================
+    # SOURCE ENTRIES
+    # =================================================================
+
+    def _entries_from_source(
+        self,
+        text: str,
+        languages: List[str],
+    ) -> List[Dict]:
+
+        platform = (
+            self._extract_platform_tag(
+                text
+            )
+        )
+
+        if not platform:
+            return []
+
+        seasons = (
+            self._season_numbers(
+                text
+            )
+        )
+
+        if not seasons:
+            seasons = ["all"]
+
+        platforms = [
+            item.strip()
+            for item in platform.split(
+                " • "
+            )
+        ]
+
+        return [
+            {
+                "platform": name,
+                "seasons": seasons,
+                "languages": (
+                    self._ordered_languages(
+                        languages
+                    )
+                ),
+                "verified": True,
+                "source": "AnimeDubHindi",
+            }
+            for name in platforms
+        ]
+
+    # =================================================================
+    # ANIME MIRCHI PLATFORM / DUB BY SEARCH
+    # =================================================================
+
+    def _search_anime_mirchi(
+        self,
+        anime_name: str,
+        query: str,
+    ) -> Optional[Dict]:
+        """
+        Anime Mirchi is the preferred source for platform and explicit
+        Dub By information.  It is intentionally independent from the
+        official OTT checks below, which are retained for compatibility
+        but are no longer needed for normal searches.
+        """
+
+        search_url = (
+            ANIME_MIRCHI_URL
+            + "?s="
+            + quote(anime_name)
         )
 
         try:
             response = self.session.get(
                 search_url,
-                timeout=DISCOVERY_TIMEOUT_SECONDS,
-                allow_redirects=True,
+                timeout=6,
+                allow_redirects=True
             )
 
             if response.status_code != 200:
-                return []
-
-        except requests.RequestException:
-            return []
-
-        soup = BeautifulSoup(
-            response.text,
-            "html.parser",
-        )
-
-        candidates: List[str] = []
-
-        # -------------------------------------------------------------
-        # DDG result parser
-        # -------------------------------------------------------------
-
-        result_nodes = soup.select(
-            "div.result"
-        )
-
-        for result in result_nodes:
-
-            links = result.select(
-                "a.result__a"
-            )
-
-            if not links:
-                links = result.find_all(
-                    "a",
-                    href=True,
+                logger.debug(
+                    "Anime Mirchi search returned %s",
+                    response.status_code
                 )
-
-            for link in links:
-
-                href = link.get(
-                    "href",
-                    "",
-                ).strip()
-
-                clean_url = (
-                    self._unwrap_search_url(
-                        href
-                    )
-                )
-
-                if not clean_url:
-                    continue
-
-                if not clean_url.startswith(
-                    ("http://", "https://")
-                ):
-                    continue
-
-                # -----------------------------------------------------
-                # SECURITY:
-                # Search result itself must already belong to the
-                # official source.
-                # -----------------------------------------------------
-
-                if not self._is_allowed_domain(
-                    clean_url,
-                    platform_cfg["domains"],
-                ):
-                    continue
-
-                # -----------------------------------------------------
-                # Reject obvious generic pages before fetching.
-                # -----------------------------------------------------
-
-                if self._is_obviously_generic_url(
-                    clean_url,
-                    platform_cfg,
-                ):
-                    continue
-
-                if clean_url not in candidates:
-                    candidates.append(
-                        clean_url
-                    )
-
-                break
-
-        return candidates
-
-    # =================================================================
-    # SEARCH URL UNWRAPPER
-    # =================================================================
-
-    @staticmethod
-    def _unwrap_search_url(
-        href: str,
-    ) -> Optional[str]:
-
-        if not href:
-            return None
-
-        href = html.unescape(
-            unquote(href)
-        )
-
-        # -------------------------------------------------------------
-        # DuckDuckGo "uddg" redirect parameter
-        # -------------------------------------------------------------
-
-        try:
-            parsed = urlparse(
-                href
-            )
-
-            params = parse_qs(
-                parsed.query
-            )
-
-            if "uddg" in params:
-
-                target = params[
-                    "uddg"
-                ][0]
-
-                target = unquote(
-                    html.unescape(
-                        target
-                    )
-                )
-
-                if target.startswith(
-                    ("http://", "https://")
-                ):
-                    return target
-
-        except Exception:
-            pass
-
-        return href
-
-    # =================================================================
-    # STANDARD OFFICIAL PAGE
-    # =================================================================
-
-    def _verify_standard_candidate(
-        self,
-        platform_name: str,
-        platform_cfg: Dict,
-        candidate_url: str,
-        anime_name: str,
-        query: str,
-        is_movie_query: bool,
-    ) -> Optional[Dict]:
-
-        try:
-
-            # ---------------------------------------------------------
-            # DIRECT FETCH
-            # ---------------------------------------------------------
-
-            page_resp = self.session.get(
-                candidate_url,
-                timeout=PAGE_TIMEOUT_SECONDS,
-                allow_redirects=True,
-            )
-
-            if page_resp.status_code != 200:
-                return None
-
-            final_url = page_resp.url
-
-            # ---------------------------------------------------------
-            # REDIRECT VALIDATION
-            # ---------------------------------------------------------
-
-            if not self._is_allowed_domain(
-                final_url,
-                platform_cfg["domains"],
-            ):
-                return None
-
-            # ---------------------------------------------------------
-            # PARSE OFFICIAL PAGE
-            # ---------------------------------------------------------
-
-            page_soup = BeautifulSoup(
-                page_resp.text,
-                "html.parser",
-            )
-
-            # ---------------------------------------------------------
-            # GENERIC PAGE REJECTION
-            # ---------------------------------------------------------
-
-            if self._is_generic_landing_page(
-                final_url,
-                page_soup,
-            ):
-                return None
-
-            # ---------------------------------------------------------
-            # CANONICAL URL VALIDATION
-            # ---------------------------------------------------------
-
-            canonical_url = (
-                self._extract_canonical_url(
-                    page_soup,
-                    final_url,
-                )
-            )
-
-            if canonical_url:
-
-                if not self._is_allowed_domain(
-                    canonical_url,
-                    platform_cfg["domains"],
-                ):
-                    return None
-
-            # ---------------------------------------------------------
-            # OFFICIAL PAGE TITLE
-            # ---------------------------------------------------------
-
-            page_title = (
-                self._extract_official_page_title(
-                    page_soup
-                )
-            )
-
-            page_text = page_soup.get_text(
-                " ",
-                strip=True,
-            )
-
-            if not page_title:
-                return None
-
-            if len(page_text) < 80:
-                return None
-
-            # ---------------------------------------------------------
-            # ANIME IDENTITY VERIFICATION
-            # ---------------------------------------------------------
-
-            identity_ok = (
-                self._title_matches(
-                    page_title,
-                    query,
-                )
-                or self._title_matches(
-                    page_text[:2000],
-                    query,
-                )
-            )
-
-            if not identity_ok:
-                return None
-
-            # ---------------------------------------------------------
-            # MOVIE / SERIES INTENT
-            # ---------------------------------------------------------
-
-            is_page_movie = (
-                self._is_movie_result(
-                    page_title
-                )
-                or self._is_movie_result(
-                    page_text[:1500]
-                )
-            )
-
-            if is_movie_query != is_page_movie:
-                return None
-
-            # ---------------------------------------------------------
-            # VERIFIED LANGUAGE EXTRACTION
-            # ---------------------------------------------------------
-
-            verified_languages = (
-                self._extract_verified_languages(
-                    page_text,
-                    page_soup,
-                )
-            )
-
-            # ---------------------------------------------------------
-            # SEASONS
-            # ---------------------------------------------------------
-
-            seasons = (
-                self._extract_seasons(
-                    page_text,
-                    page_soup,
-                )
-            )
-
-            # ---------------------------------------------------------
-            # EPISODES
-            # ---------------------------------------------------------
-
-            episodes = (
-                self._extract_episodes(
-                    page_text,
-                    page_soup,
-                )
-            )
-
-            # ---------------------------------------------------------
-            # STATUS
-            # ---------------------------------------------------------
-
-            status = (
-                self._extract_status(
-                    page_text,
-                    page_soup,
-                )
-            )
-
-            # ---------------------------------------------------------
-            # VERIFIED RESULT
-            # ---------------------------------------------------------
-
-            return {
-                "verified": True,
-                "platform": platform_name,
-                "url": final_url,
-                "languages": verified_languages,
-                "seasons": seasons,
-                "episodes": episodes,
-                "status": status,
-                "title": self._clean_title(
-                    page_title
-                ),
-            }
-
-        except (
-            requests.RequestException,
-            ValueError,
-            Exception,
-        ) as exc:
-
-            logger.debug(
-                "Direct verification failed "
-                "for %s: %s",
-                candidate_url,
-                exc,
-            )
-
-            return None
-
-    # =================================================================
-    # YOUTUBE VERIFICATION
-    # =================================================================
-
-    def _verify_youtube_candidate(
-        self,
-        platform_name: str,
-        platform_cfg: Dict,
-        candidate_url: str,
-        anime_name: str,
-        query: str,
-        is_movie_query: bool,
-    ) -> Optional[Dict]:
-
-        try:
-
-            parsed = urlparse(
-                candidate_url
-            )
-
-            hostname = (
-                parsed.hostname or ""
-            ).lower()
-
-            # ---------------------------------------------------------
-            # ONLY REAL YOUTUBE HOSTS
-            # ---------------------------------------------------------
-
-            if hostname not in {
-                "youtube.com",
-                "www.youtube.com",
-                "m.youtube.com",
-            }:
-                return None
-
-            path = (
-                parsed.path or ""
-            ).lower()
-
-            # ---------------------------------------------------------
-            # CHANNEL HOME IS NOT AN ANIME RESULT
-            # ---------------------------------------------------------
-
-            if path.startswith("/@"):
-                return None
-
-            # ---------------------------------------------------------
-            # ACTUAL VIDEO / PLAYLIST REQUIRED
-            # ---------------------------------------------------------
-
-            query_params = parse_qs(
-                parsed.query
-            )
-
-            is_video = (
-                path == "/watch"
-                and bool(
-                    query_params.get(
-                        "v"
-                    )
-                )
-            )
-
-            is_playlist = bool(
-                query_params.get(
-                    "list"
-                )
-            )
-
-            if not is_video and not is_playlist:
-                return None
-
-            # ---------------------------------------------------------
-            # OFFICIAL CHANNEL OWNER CHECK
-            # ---------------------------------------------------------
-
-            if not self._verify_youtube_owner_oembed(
-                candidate_url,
-                platform_cfg,
-            ):
-                return None
-
-            # ---------------------------------------------------------
-            # DIRECT FETCH
-            # ---------------------------------------------------------
-
-            response = self.session.get(
-                candidate_url,
-                timeout=PAGE_TIMEOUT_SECONDS,
-                allow_redirects=True,
-            )
-
-            if response.status_code != 200:
-                return None
-
-            final_url = response.url
-
-            if not self._is_allowed_domain(
-                final_url,
-                ["youtube.com"],
-            ):
                 return None
 
             soup = BeautifulSoup(
                 response.text,
-                "html.parser",
+                "html.parser"
             )
 
-            # ---------------------------------------------------------
-            # GENERIC PAGE CHECK
-            # ---------------------------------------------------------
+            candidates = []
+            seen = set()
 
-            if self._is_generic_landing_page(
-                final_url,
-                soup,
+            for link in soup.find_all(
+                "a",
+                href=True
             ):
-                return None
+                title = link.get_text(
+                    " ",
+                    strip=True
+                )
+                href = link.get("href")
 
-            # ---------------------------------------------------------
-            # TITLE + TEXT
-            # ---------------------------------------------------------
+                if not title or not href:
+                    continue
 
-            page_title = (
-                self._extract_official_page_title(
-                    soup
+                if len(title) > 300:
+                    continue
+
+                if self._is_generic_title(title):
+                    continue
+
+                full_url = urljoin(
+                    ANIME_MIRCHI_URL,
+                    href
+                )
+
+                if not full_url.startswith(
+                    ANIME_MIRCHI_URL
+                ):
+                    continue
+
+                if full_url in seen:
+                    continue
+
+                if not self._title_matches(
+                    title,
+                    query
+                ):
+                    continue
+
+                seen.add(full_url)
+
+                score = 0
+
+                normalized_title = self._normalize(title)
+                normalized_query = self._normalize(anime_name)
+
+                if normalized_title == normalized_query:
+                    score += 100
+                elif normalized_query in normalized_title:
+                    score += 50
+
+                if re.search(
+                    r"\b(guide|hindi|dub|india|season|episodes?)\b",
+                    title,
+                    re.I
+                ):
+                    score += 10
+
+                candidates.append(
+                    (score, title, full_url)
+                )
+
+            candidates.sort(
+                key=lambda item: item[0],
+                reverse=True
+            )
+
+            for _score, title, article_url in candidates[:8]:
+                parsed = self._parse_anime_mirchi_page(
+                    article_url,
+                    title,
+                    query
+                )
+
+                if parsed:
+                    return parsed
+
+            # Anime Mirchi can occasionally return an incomplete WordPress
+            # search page.  Use a site-restricted search-engine lookup as
+            # a fallback, while still fetching/parsing only Anime Mirchi
+            # pages for the actual metadata.
+            engine_url = (
+                "https://html.duckduckgo.com/html/?q="
+                + quote(
+                    f'site:animemirchi.com "{anime_name}"'
                 )
             )
 
-            page_text = soup.get_text(
-                " ",
-                strip=True,
+            engine_response = self.session.get(
+                engine_url,
+                timeout=6
             )
 
-            if not page_title:
-                return None
-
-            if len(page_text) < 50:
-                return None
-
-            # ---------------------------------------------------------
-            # ANIME IDENTITY
-            # ---------------------------------------------------------
-
-            if not (
-                self._title_matches(
-                    page_title,
-                    query,
+            if engine_response.status_code == 200:
+                engine_soup = BeautifulSoup(
+                    engine_response.text,
+                    "html.parser"
                 )
-                or self._title_matches(
-                    page_text[:2000],
-                    query,
-                )
-            ):
-                return None
 
-            # ---------------------------------------------------------
-            # MOVIE / SERIES
-            # ---------------------------------------------------------
+                engine_candidates = []
 
-            is_page_movie = (
-                self._is_movie_result(
-                    page_title
-                )
-                or self._is_movie_result(
-                    page_text[:1500]
-                )
-            )
+                for item in engine_soup.select(".result")[:10]:
+                    anchor = item.select_one(".result__a")
 
-            if is_movie_query != is_page_movie:
-                return None
+                    if not anchor:
+                        continue
 
-            # ---------------------------------------------------------
-            # LANGUAGE
-            # ---------------------------------------------------------
+                    href = unquote(
+                        anchor.get("href", "")
+                    )
 
-            languages = (
-                self._extract_verified_languages(
-                    page_text,
-                    soup,
-                )
-            )
+                    if "animemirchi.com" not in href.lower():
+                        continue
 
-            # ---------------------------------------------------------
-            # SEASONS
-            # ---------------------------------------------------------
+                    title_text = anchor.get_text(
+                        " ",
+                        strip=True
+                    )
 
-            seasons = (
-                self._extract_seasons(
-                    page_text,
-                    soup,
-                )
-            )
+                    if not self._title_matches(
+                        title_text,
+                        query
+                    ):
+                        continue
 
-            # ---------------------------------------------------------
-            # EPISODES
-            # ---------------------------------------------------------
+                    engine_candidates.append(
+                        (title_text, href)
+                    )
 
-            episodes = (
-                self._extract_episodes(
-                    page_text,
-                    soup,
-                )
-            )
+                for title_text, article_url in engine_candidates:
+                    parsed = self._parse_anime_mirchi_page(
+                        article_url,
+                        title_text,
+                        query
+                    )
 
-            # ---------------------------------------------------------
-            # STATUS
-            # ---------------------------------------------------------
-
-            status = (
-                self._extract_status(
-                    page_text,
-                    soup,
-                )
-            )
-
-            return {
-                "verified": True,
-                "platform": platform_name,
-                "url": final_url,
-                "languages": languages,
-                "seasons": seasons,
-                "episodes": episodes,
-                "status": status,
-                "title": self._clean_title(
-                    page_title
-                ),
-            }
+                    if parsed:
+                        return parsed
 
         except Exception as exc:
-
             logger.debug(
-                "YouTube verification failed "
-                "for %s: %s",
-                candidate_url,
-                exc,
+                "Anime Mirchi search failed: %s",
+                exc
             )
 
         return None
 
-    # =================================================================
-    # YOUTUBE OWNER VERIFICATION
-    # =================================================================
-
-    def _verify_youtube_owner_oembed(
+    def _parse_anime_mirchi_page(
         self,
-        video_url: str,
-        platform_cfg: Dict,
-    ) -> bool:
-
-        handles = [
-            h.lower().lstrip("@")
-            for h in platform_cfg.get(
-                "youtube_handles",
-                [],
-            )
-        ]
-
-        if not handles:
-            return False
+        url: str,
+        fallback_title: str,
+        query: str,
+      ) -> Optional[Dict]:
 
         try:
-
-            oembed_url = (
-                "https://www.youtube.com/oembed"
-                "?url="
-                + quote(
-                    video_url,
-                    safe="",
-                )
-                + "&format=json"
-            )
-
             response = self.session.get(
-                oembed_url,
-                timeout=PAGE_TIMEOUT_SECONDS,
-                allow_redirects=True,
+                url,
+                timeout=6,
+                allow_redirects=True
             )
 
             if response.status_code != 200:
-                return False
+                return None
 
-            data = response.json()
-
-            author_url = str(
-                data.get(
-                    "author_url",
-                    "",
-                )
-            ).lower()
-
-            author_name = str(
-                data.get(
-                    "author_name",
-                    "",
-                )
-            ).lower()
-
-            # ---------------------------------------------------------
-            # STRONG CHECK:
-            # Official handle must appear in author URL.
-            # ---------------------------------------------------------
-
-            for handle in handles:
-
-                if (
-                    f"/@{handle}"
-                    in author_url
-                ):
-                    return True
-
-            # ---------------------------------------------------------
-            # FALLBACK:
-            # Exact-ish normalized author name comparison.
-            # ---------------------------------------------------------
-
-            normalized_author = re.sub(
-                r"[^a-z0-9]+",
-                "",
-                author_name,
+            soup = BeautifulSoup(
+                response.text,
+                "html.parser"
             )
 
-            for handle in handles:
+            for tag in soup.find_all(
+                ["script", "style", "noscript"]
+            ):
+                tag.decompose()
 
-                normalized_handle = re.sub(
-                    r"[^a-z0-9]+",
-                    "",
-                    handle,
+            title = self._pick_title(
+                soup,
+                fallback_title
+            )
+
+            text = soup.get_text(
+                " ",
+                strip=True
+            )
+
+            # Preserve table row structure in a compact metadata block so
+            # labels such as Platform (India), Dub Platform(s), and Studio
+            # remain associated with their values after HTML flattening.
+            table_parts = []
+            for table in soup.find_all("table"):
+                for row in table.find_all("tr"):
+                    cells = [
+                        cell.get_text(" ", strip=True)
+                        for cell in row.find_all(["th", "td"])
+                    ]
+                    if cells:
+                        table_parts.append(" | ".join(cells))
+
+            if table_parts:
+                text += " " + " ".join(table_parts)
+
+            if self._is_generic_title(title):
+                title = fallback_title
+
+            if not self._title_matches(
+                title,
+                query
+            ) and not self._query_present(
+                query,
+                text[:30000]
+            ):
+                return None
+
+            platforms = self._extract_mirchi_platforms(text)
+            dub_by = self._extract_mirchi_dub_by(text)
+
+            # A page with no platform/dub information is not useful as
+            # the platform source, so continue to the next candidate.
+            if not platforms and not dub_by:
+                return None
+
+            languages = self._extract_languages(text)
+            seasons = self._season_numbers(text)
+
+            entries = []
+
+            for platform in platforms:
+                entries.append(
+                    {
+                        "platform": platform,
+                        "seasons": seasons or ["all"],
+                        "languages": self._ordered_languages(
+                            languages
+                        ),
+                        "verified": True,
+                        "source": "Anime Mirchi",
+                    }
                 )
 
-                if (
-                    normalized_author
-                    == normalized_handle
+            return {
+                "name": self._clean_mirchi_title(title),
+                "platform": " • ".join(platforms) if platforms else None,
+                "platform_entries": self._dedupe_platform_entries(entries),
+                "dub_by": dub_by,
+                "hindi_dub": (
+                    "Available"
+                    if re.search(r"\bHindi\b", text, re.I)
+                    else None
+                ),
+                "source_link": url,
+            }
+
+        except Exception as exc:
+            logger.debug(
+                "Anime Mirchi page parsing failed: %s",
+                exc
+            )
+
+        return None
+
+    @staticmethod
+    def _clean_mirchi_title(
+        title: str,
+    ) -> str:
+
+        value = re.sub(
+            r"\s+[-|–]\s+Anime Mirchi.*$",
+            "",
+            title or "",
+            flags=re.I
+        )
+
+        return value.strip()
+
+    @staticmethod
+    def _extract_mirchi_platforms(
+        text: str,
+    ) -> List[str]:
+        """Extract platform names from Anime Mirchi article text."""
+
+        found = []
+
+        platform_names = [
+            "Crunchyroll",
+            "Netflix",
+            "JioHotstar",
+            "Jio Hotstar",
+            "Amazon Prime Video",
+            "Prime Video",
+            "Sony YAY",
+            "Sony LIV",
+            "MX Player",
+            "Muse India",
+            "Anime Times",
+            "Ani-One",
+            "YouTube",
+        ]
+
+        # Labelled text sections.
+        patterns = [
+            r"Indian Platforms\s*[:|]?\s*(.{0,400})",
+            r"Dub Platform\(s\)\s*[:|]?\s*(.{0,400})",
+            r"Platform \(India\)\s*[:|]?\s*(.{0,400})",
+            r"Where to Watch(?: Solo Leveling)?\s*(.{0,500})",
+        ]
+
+        chunks = []
+
+        for pattern in patterns:
+            chunks.extend(
+                re.findall(
+                    pattern,
+                    text or "",
+                    re.I
+                )
+            )
+
+        # Also inspect table-like flattened text.  Anime Mirchi commonly
+        # uses rows such as `Platform (India) | Crunchyroll`.
+        chunks.extend(
+            re.findall(
+                r"(?:Platform|Indian Platforms|Dub Platform\(s\))\s*[^.]{0,500}",
+                text or "",
+                re.I
+            )
+        )
+
+        for chunk in chunks:
+            for platform in platform_names:
+                if re.search(
+                    rf"\b{re.escape(platform)}\b",
+                    chunk,
+                    re.I
                 ):
-                    return True
+                    canonical = {
+                        "Jio Hotstar": "JioHotstar",
+                        "Prime Video": "Amazon Prime Video",
+                    }.get(
+                        platform,
+                        platform
+                    )
+
+                    if canonical not in found:
+                        found.append(canonical)
+
+        return found
+
+    @staticmethod
+    def _extract_mirchi_dub_by(
+        text: str,
+    ) -> Optional[str]:
+        patterns = [
+            r"Dubbed\s+By\s*[:|]\s*([^|.]{1,120})",
+            r"Dub\s+By\s*[:|]\s*([^|.]{1,120})",
+            r"Dubbing\s+(?:By|Studio)\s*[:|]\s*([^|.]{1,120})",
+            r"dubbing\s+(?:was|is)\s+(?:done|produced)\s+by\s+([^|.]{1,120})",
+        ]
+
+        for pattern in patterns:
+            match = re.search(
+                pattern,
+                text or "",
+                re.I
+            )
+            if match:
+                value = re.sub(
+                    r"\s+",
+                    " ",
+                    match.group(1)
+                ).strip(" :-|•,")
+
+                if value and len(value) <= 120:
+                    return value
+
+        return None
+
+    @staticmethod
+    def _is_movie_result(
+        title: str,
+        details: Optional[str],
+    ) -> bool:
+        value = f"{title or ''} {details or ''}"
+        return bool(
+            re.search(
+                r"\b(movie|film|theatrical|ova film)\b",
+                value,
+                re.I
+            )
+        )
+
+    # =================================================================
+    # OFFICIAL PLATFORM CHECK
+    # =================================================================
+
+    def _check_official_sources(
+        self,
+        anime_name: str,
+    ) -> Dict:
+        """
+        Check all configured official domains concurrently.
+
+        A result is accepted only after a page from the official domain is
+        fetched and the page itself contains the anime query plus an audio
+        language signal. Search-engine results are discovery only; they are
+        never treated as proof on their own.
+        """
+
+        tasks = []
+        for platform, domains in OFFICIAL_SOURCES.items():
+            for domain in domains:
+                tasks.append((platform, domain))
+
+        def check_one(platform: str, domain: str):
+            local_entries = []
+            local_dub_by = []
+
+            try:
+                results = self._search_engine(anime_name, domain)
+                for item in results[:5]:
+                    page = self._fetch_page(item.get("url", ""))
+                    if not page:
+                        continue
+
+                    page_text, _soup = page
+                    combined = (
+                        f"{item.get('title', '')} "
+                        f"{item.get('snippet', '')} "
+                        f"{page_text[:50000]}"
+                    )
+
+                    if not self._query_present(anime_name, combined):
+                        continue
+
+                    languages = self._extract_languages(combined)
+                    # This checker exists specifically to prove a Hindi
+                    # dub/audio claim. Other languages alone are not enough.
+                    if "Hindi" not in languages:
+                        continue
+
+                    seasons = self._season_numbers(combined) or ["all"]
+
+                    # Official YouTube channels are displayed by their
+                    # channel/platform name, while the actual platform is
+                    # still YouTube internally.
+                    channel_platforms = {
+                        "Muse India", "Ani-One India", "Anime Times"
+                    }
+                    display_platform = (
+                        "YouTube" if platform in channel_platforms else platform
+                    )
+
+                    local_entries.append({
+                        "platform": display_platform,
+                        "channel": platform if display_platform == "YouTube" else None,
+                        "seasons": seasons,
+                        "languages": self._ordered_languages(languages),
+                        "verified": True,
+                        "source": platform,
+                    })
+
+                    explicit = self._extract_dub_by(combined)
+                    if explicit:
+                        local_dub_by.append(explicit)
+                    break
+
+            except Exception as exc:
+                logger.debug(
+                    "Official source check failed %s (%s): %s",
+                    platform, domain, exc
+                )
+
+            return local_entries, local_dub_by
+
+        entries = []
+        dub_by_names = []
+
+        # 10+ official checks can run at the same time instead of waiting
+        # for every service one after another.
+        with ThreadPoolExecutor(
+            max_workers=min(12, max(1, len(tasks))),
+            thread_name_prefix="official-source",
+        ) as executor:
+            futures = {
+                executor.submit(check_one, platform, domain): (platform, domain)
+                for platform, domain in tasks
+            }
+            for future in as_completed(futures):
+                try:
+                    found_entries, found_dub_by = future.result()
+                    entries.extend(found_entries)
+                    dub_by_names.extend(found_dub_by)
+                except Exception as exc:
+                    logger.debug("Official worker failed: %s", exc)
+
+        unique_dub_by = list(dict.fromkeys(
+            value for value in dub_by_names if value
+        ))
+
+        return {
+            "platform_entries": self._dedupe_platform_entries(entries),
+            "dub_by": " • ".join(unique_dub_by) if unique_dub_by else None,
+        }
+
+    # =================================================================
+    # WEB SEARCH
+    # =================================================================
+
+    def _search_engine(
+        self,
+        anime_name: str,
+        domain: str,
+    ) -> List[Dict]:
+
+        query = (
+            f"site:{domain} "
+            f'"{anime_name}" '
+            f'"Hindi" anime'
+        )
+
+        url = (
+            "https://html.duckduckgo.com/html/?q="
+            + quote(query)
+        )
+
+        try:
+
+            response = self.session.get(
+                url,
+                timeout=15
+            )
+
+            response.raise_for_status()
+
+            soup = BeautifulSoup(
+                response.text,
+                "html.parser"
+            )
+
+            results = []
+
+            for result in soup.select(
+                ".result"
+            )[:10]:
+
+                anchor = result.select_one(
+                    ".result__a"
+                )
+
+                if not anchor:
+                    continue
+
+                href = anchor.get(
+                    "href"
+                )
+
+                if not href:
+                    continue
+
+                href = unquote(
+                    href
+                )
+
+                if domain.lower() not in (
+                    href.lower()
+                ):
+                    continue
+
+                snippet_tag = (
+                    result.select_one(
+                        ".result__snippet"
+                    )
+                )
+
+                results.append(
+                    {
+                        "url": href,
+                        "title": anchor.get_text(
+                            " ",
+                            strip=True
+                        ),
+                        "snippet": (
+                            snippet_tag.get_text(
+                                " ",
+                                strip=True
+                            )
+                            if snippet_tag
+                            else ""
+                        ),
+                    }
+          )
+      
+            return results
 
         except Exception as exc:
 
             logger.debug(
-                "YouTube oEmbed verification "
-                "failed: %s",
-                exc,
+                "Official source search failed %s: %s",
+                domain,
+                exc
             )
 
-        return False
-
-            # =================================================================
-    # SECURITY & DOMAIN VERIFICATION
+            return []
+    # =================================================================
+    # FETCH PAGE
     # =================================================================
 
-    @staticmethod
-    def _is_allowed_domain(
+    def _fetch_page(
+        self,
         url: str,
-        allowed_domains: List[str],
-    ) -> bool:
+    ) -> Optional[tuple]:
 
         try:
-            parsed = urlparse(
-                url
+
+            response = self.session.get(
+                url,
+                timeout=15,
+                allow_redirects=True
             )
 
-            hostname = (
-                parsed.hostname or ""
-            ).lower().rstrip(".")
+            if response.status_code != 200:
+                return None
 
-            if not hostname:
-                return False
-
-            for domain in allowed_domains:
-
-                domain = (
-                    domain.lower()
-                    .strip()
-                    .rstrip(".")
-                )
-
-                # Exact domain OR legitimate subdomain.
-                if (
-                    hostname == domain
-                    or hostname.endswith(
-                        "." + domain
-                    )
-                ):
-                    return True
-
-            return False
-
-        except Exception:
-            return False
-
-    # =================================================================
-    # OBVIOUS GENERIC URL DETECTION
-    # =================================================================
-
-    @staticmethod
-    def _is_obviously_generic_url(
-        url: str,
-        platform_cfg: Dict,
-    ) -> bool:
-
-        try:
-            parsed = urlparse(
-                url
+            soup = BeautifulSoup(
+                response.text,
+                "html.parser"
             )
 
-            path = (
-                parsed.path or ""
-            ).strip("/").lower()
-
-            # ---------------------------------------------------------
-            # Root/homepage
-            # ---------------------------------------------------------
-
-            if not path:
-                return True
-
-            # ---------------------------------------------------------
-            # Generic routes
-            # ---------------------------------------------------------
-
-            generic_paths = {
-                "login",
-                "signin",
-                "sign-in",
-                "register",
-                "signup",
-                "browse",
-                "search",
-                "home",
-                "catalog",
-                "error",
-                "404",
-            }
-
-            if path in generic_paths:
-                return True
-
-            # ---------------------------------------------------------
-            # Search / browse / catalog routes
-            # ---------------------------------------------------------
-
-            if path.startswith(
-                (
-                    "search",
-                    "browse",
-                    "catalog",
-                )
+            for tag in soup.find_all(
+                [
+                    "script",
+                    "style",
+                    "noscript",
+                ]
             ):
-                return True
+                tag.decompose()
 
-            # ---------------------------------------------------------
-            # YouTube channel homepage
-            # ---------------------------------------------------------
-
-            hostname = (
-                parsed.hostname or ""
-            ).lower()
-
-            if "youtube.com" in hostname:
-
-                if path.startswith("@"):
-                    return True
+            return (
+                soup.get_text(
+                    " ",
+                    strip=True
+                ),
+                soup,
+            )
 
         except Exception:
-            return True
-
-        return False
+            return None
 
     # =================================================================
-    # CANONICAL URL EXTRACTION
-    # =================================================================
-
-    @staticmethod
-    def _extract_canonical_url(
-        soup: BeautifulSoup,
-        base_url: str,
-    ) -> Optional[str]:
-
-        # -------------------------------------------------------------
-        # Standard canonical tag
-        # -------------------------------------------------------------
-
-        canonical_tag = soup.find(
-            "link",
-            attrs={
-                "rel": re.compile(
-                    r"canonical",
-                    re.I,
-                )
-            },
-        )
-
-        if canonical_tag:
-
-            href = canonical_tag.get(
-                "href"
-            )
-
-            if href:
-
-                return urljoin(
-                    base_url,
-                    href.strip(),
-                )
-
-        # -------------------------------------------------------------
-        # OpenGraph URL fallback
-        # -------------------------------------------------------------
-
-        og_url = soup.find(
-            "meta",
-            attrs={
-                "property": "og:url"
-            },
-        )
-
-        if og_url:
-
-            content = og_url.get(
-                "content"
-            )
-
-            if content:
-
-                return urljoin(
-                    base_url,
-                    content.strip(),
-                )
-
-        return None
-
-    # =================================================================
-    # GENERIC LANDING PAGE DETECTION
-    # =================================================================
-
-    @staticmethod
-    def _is_generic_landing_page(
-        url: str,
-        soup: BeautifulSoup,
-    ) -> bool:
-
-        parsed = urlparse(
-            url
-        )
-
-        path = (
-            parsed.path or ""
-        ).strip("/").lower()
-
-        # -------------------------------------------------------------
-        # Root URL
-        # -------------------------------------------------------------
-
-        if not path:
-            return True
-
-        # -------------------------------------------------------------
-        # Authentication / generic routes
-        # -------------------------------------------------------------
-
-        generic_paths = {
-            "login",
-            "signin",
-            "sign-in",
-            "register",
-            "signup",
-            "browse",
-            "search",
-            "home",
-            "catalog",
-            "error",
-            "404",
-        }
-
-        if path in generic_paths:
-            return True
-
-        # -------------------------------------------------------------
-        # Search / browse / catalog
-        # -------------------------------------------------------------
-
-        if path.startswith(
-            (
-                "search",
-                "browse",
-                "catalog",
-            )
-        ):
-            return True
-
-        # -------------------------------------------------------------
-        # YouTube channel root
-        # -------------------------------------------------------------
-
-        hostname = (
-            parsed.hostname or ""
-        ).lower()
-
-        if "youtube.com" in hostname:
-
-            if path.startswith("@"):
-
-                # A channel page is not an anime result.
-                return True
-
-        # -------------------------------------------------------------
-        # Generic HTML title detection
-        # -------------------------------------------------------------
-
-        title_text = ""
-
-        if soup.title:
-
-            title_text = (
-                soup.title.get_text(
-                    " ",
-                    strip=True,
-                ).lower()
-            )
-
-        generic_titles = [
-            "log in",
-            "sign in",
-            "404 not found",
-            "page not found",
-            "home page",
-            "welcome to",
-            "search results",
-            "browse anime",
-            "watch popular movies",
-        ]
-
-        for generic_title in generic_titles:
-
-            if generic_title in title_text:
-                return True
-
-        return False
-
-    # =================================================================
-    # JIKAN / MYANIMELIST
+    # JIKAN / MAL
     # =================================================================
 
     def _get_mal_info(
         self,
         anime_name: str,
-        is_movie_query: bool,
     ) -> Optional[Dict]:
-
         """
-        Fetch ONLY neutral metadata from Jikan/MyAnimeList.
+        Get authoritative anime metadata from Jikan/MAL.
 
-        Jikan is never trusted for:
-        - Hindi dub
-        - Audio language
-        - OTT availability
-        - Platform
-        - Dub provider
-        - Official episode verification
+        Jikan is used for:
+        - title / MAL URL
+        - poster
+        - studio
+        - status
+        - total episode count
+        - broadcast schedule
+        - aired episode count
+        - latest aired episode/date
+        - expected next episode/date
+
+        Important: Jikan's broadcast schedule is an EXPECTED schedule.
+        A delayed/cancelled episode can therefore differ from it.
         """
 
         try:
-
             response = self.session.get(
                 JIKAN_URL,
                 params={
                     "q": anime_name,
-                    "limit": 5,
+                    "limit": 10,
                     "sfw": "true",
                 },
-                timeout=PAGE_TIMEOUT_SECONDS,
+                timeout=12,
             )
-
             response.raise_for_status()
 
-            payload = response.json()
-
-            data = payload.get(
-                "data",
-                [],
-            )
-
+            data = response.json().get("data", [])
             if not data:
                 return None
 
-            selected_anime = None
+            query = self._normalize(anime_name)
+            selected = None
 
-            # ---------------------------------------------------------
-            # Select matching movie/series type.
-            # ---------------------------------------------------------
-
+            # Exact title first.
             for anime in data:
-
-                anime_type = (
-                    anime.get(
-                        "type"
-                    )
-                    or ""
-                ).lower()
-
-                is_type_movie = (
-                    anime_type
-                    in {
-                        "movie",
-                        "feature film",
-                    }
-                )
-
-                if (
-                    is_movie_query
-                    and is_type_movie
+                if any(
+                    self._normalize(title) == query
+                    for title in self._get_titles(anime)
                 ):
-                    selected_anime = anime
+                    selected = anime
                     break
 
-                if (
-                    not is_movie_query
-                    and not is_type_movie
-                ):
-                    selected_anime = anime
-                    break
+            # Then partial/alternative title.
+            if selected is None:
+                for anime in data:
+                    if any(
+                        self._title_matches(title, query)
+                        for title in self._get_titles(anime)
+                    ):
+                        selected = anime
+                        break
 
-            # ---------------------------------------------------------
-            # If no correctly typed result exists,
-            # DO NOT blindly use data[0].
-            # ---------------------------------------------------------
-
-            if not selected_anime:
+            if selected is None:
+                # Avoid returning an unrelated MAL result.
                 return None
 
-            # ---------------------------------------------------------
-            # Poster
-            # ---------------------------------------------------------
+            mal_id = selected.get("mal_id")
+            if not mal_id:
+                return None
+
+            # Fetch /full because the search result can omit broadcast,
+            # aired dates and other useful fields.
+            full = selected
+            try:
+                full_response = self.session.get(
+                    f"{JIKAN_API_BASE}/anime/{mal_id}/full",
+                    timeout=10,
+                )
+                if full_response.ok:
+                    full = full_response.json().get("data") or selected
+            except Exception as exc:
+                logger.debug("Jikan full lookup failed: %s", exc)
 
             jpg = (
-                selected_anime
-                .get(
-                    "images",
-                    {},
-                )
-                .get(
-                    "jpg",
-                    {},
-                )
+                full.get("images", {})
+                .get("jpg", {})
             )
 
             poster = (
-                jpg.get(
-                    "large_image_url"
-                )
-                or jpg.get(
-                    "image_url"
-                )
+                jpg.get("large_image_url")
+                or jpg.get("image_url")
+                or jpg.get("small_image_url")
             )
 
-            # ---------------------------------------------------------
-            # Studio
-            # ---------------------------------------------------------
-
             studios = []
+            for item in full.get("studios", []):
+                if isinstance(item, dict) and item.get("name"):
+                    studios.append(item["name"])
 
-            for studio in selected_anime.get(
-                "studios",
-                [],
-            ):
+            studio = (
+                " • ".join(dict.fromkeys(studios))
+                if studios
+                else None
+            )
 
-                if (
-                    isinstance(
-                        studio,
-                        dict,
-                    )
-                    and studio.get(
-                        "name"
-                    )
-                ):
-                    studios.append(
-                        studio["name"]
-                    )
+            total_episodes = full.get("episodes")
+            status = full.get("status")
+            airing = bool(full.get("airing"))
 
-            # ---------------------------------------------------------
-            # Neutral metadata only
-            # ---------------------------------------------------------
+            aired_count = None
+            last_episode = None
+            last_episode_date = None
+
+            # Jikan's episode endpoint gives the number of episodes that
+            # have actually aired and the latest episode/date. The
+            # pagination total is used instead of assuming total episodes
+            # have already released.
+            try:
+                ep_response = self.session.get(
+                    f"{JIKAN_API_BASE}/anime/{mal_id}/episodes",
+                    params={"page": 1},
+                    timeout=10,
+                )
+
+                if ep_response.ok:
+                    ep_data = ep_response.json()
+                    pagination = ep_data.get("pagination", {})
+                    items = ep_data.get("data", [])
+
+                    total_items = (
+                        pagination.get("items", {})
+                        if isinstance(pagination.get("items"), dict)
+                        else {}
+                    ).get("total")
+
+                    if total_items is not None:
+                        aired_count = int(total_items)
+
+                    dated_items = [
+                        item for item in items
+                        if item.get("aired")
+                    ]
+
+                    if dated_items:
+                        latest = max(
+                            dated_items,
+                            key=lambda item: item.get("aired") or ""
+                        )
+                        last_episode = latest.get("mal_id")
+                        last_episode_date = latest.get("aired")
+            except Exception as exc:
+                logger.debug(
+                    "Jikan episode lookup failed for %s: %s",
+                    anime_name,
+                    exc
+                )
+
+            # Completed anime: all episodes are already released.
+            if not airing and total_episodes is not None:
+                aired_count = int(total_episodes)
+
+            broadcast = full.get("broadcast") or {}
+            broadcast_text = broadcast.get("string")
+            next_episode_date = None
+            next_episode = None
+
+            # For an airing series, calculate the next EXPECTED broadcast
+            # from MAL/Jikan's weekday/time/timezone. We never present this
+            # as a guaranteed release when the source only provides a
+            # schedule.
+            if airing:
+                next_dt = self._next_broadcast_datetime(
+                    broadcast
+                )
+                if next_dt:
+                    next_episode_date = next_dt.isoformat()
+                    if aired_count is not None:
+                        next_episode = aired_count + 1
+
+            # Fallback for a currently airing show where Jikan's episode
+            # list is temporarily unavailable.
+            if airing and next_episode is None and aired_count is not None:
+                next_episode = aired_count + 1
 
             return {
                 "name": (
-                    selected_anime.get(
-                        "title"
-                    )
+                    full.get("title")
+                    or full.get("title_english")
                     or anime_name
                 ),
-
                 "poster_url": poster,
+                "studio": studio,
+                "mal_url": full.get("url"),
+                "mal_id": mal_id,
 
-                "studio": (
-                    " • ".join(studios)
-                    if studios
+                "episodes": (
+                    str(total_episodes)
+                    if total_episodes is not None
                     else None
                 ),
+                "total_episodes": (
+                    int(total_episodes)
+                    if total_episodes is not None
+                    else None
+                ),
+                "aired_episodes": aired_count,
+                "last_episode": (
+                    str(last_episode)
+                    if last_episode is not None
+                    else None
+                ),
+                "last_episode_date": (
+                    last_episode_date
+                ),
+                "next_episode": (
+                    str(next_episode)
+                    if next_episode is not None
+                    else None
+                ),
+                "next_episode_date": next_episode_date,
 
-                "mal_url": (
-                    selected_anime.get(
-                        "url"
-                    )
+                "status": status,
+                "airing": airing,
+                "broadcast": broadcast_text,
+
+                "aired_from": (
+                    (full.get("aired") or {}).get("from")
+                ),
+                "aired_to": (
+                    (full.get("aired") or {}).get("to")
                 ),
             }
 
         except Exception as exc:
-
-            logger.debug(
-                "MAL neutral lookup failed: %s",
-                exc,
+            logger.warning(
+                "Jikan lookup failed for %s: %s",
+                anime_name,
+                exc
             )
-
-        return None
-
-    # =================================================================
-    # RESULT MERGING
-    # =================================================================
-
-    def _merge_results(
-        self,
-        official_results: Dict[str, Dict],
-        mal_info: Optional[Dict],
-        anime_name: str,
-        is_movie_query: bool,
-    ) -> Optional[Dict]:
-
-        # -------------------------------------------------------------
-        # Absolutely require at least one official verification.
-        # -------------------------------------------------------------
-
-        if not official_results:
             return None
 
-        verified_platforms = list(
-            official_results.keys()
-        )
+    @staticmethod
+    def _next_broadcast_datetime(
+        broadcast: Dict,
+    ) -> Optional[datetime]:
+        """Return the next expected broadcast datetime in UTC."""
 
-        verified_languages: Set[str] = set()
+        if not isinstance(broadcast, dict):
+            return None
 
-        verified_seasons: List[int] = []
+        day = broadcast.get("day")
+        time_text = broadcast.get("time")
+        timezone_name = broadcast.get("timezone") or "Asia/Tokyo"
 
-        platform_episodes: Dict[
-            str,
-            str,
-        ] = {}
+        if not day or not time_text:
+            return None
 
-        dub_by: List[str] = []
-
-        verified_statuses: List[str] = []
-
-        # -------------------------------------------------------------
-        # Merge each verified official source.
-        # -------------------------------------------------------------
-
-        for (
-            platform_name,
-            platform_data,
-        ) in official_results.items():
-
-            languages = (
-                platform_data.get(
-                    "languages",
-                    [],
-                )
-                or []
-            )
-
-            # ---------------------------------------------------------
-            # Languages can ONLY come from official verification.
-            # ---------------------------------------------------------
-
-            for language in languages:
-
-                if language in SUPPORTED_LANGUAGES:
-
-                    verified_languages.add(
-                        language
-                    )
-
-            # ---------------------------------------------------------
-            # Seasons
-            # ---------------------------------------------------------
-
-            seasons = platform_data.get(
-                "seasons"
-            )
-
-            if seasons:
-
-                verified_seasons.extend(
-                    self._parse_season_numbers(
-                        seasons
-                    )
-                )
-
-            # ---------------------------------------------------------
-            # Episodes
-            # ---------------------------------------------------------
-
-            episodes = platform_data.get(
-                "episodes"
-            )
-
-            if episodes:
-
-                platform_episodes[
-                    platform_name
-                ] = episodes
-
-            # ---------------------------------------------------------
-            # Status
-            # ---------------------------------------------------------
-
-            status = platform_data.get(
-                "status"
-            )
-
-            if status:
-
-                verified_statuses.append(
-                    status
-                )
-
-            # ---------------------------------------------------------
-            # Dub provider:
-            # Only report a platform when Hindi was explicitly
-            # verified there.
-            # ---------------------------------------------------------
-
-            if (
-                "Hindi" in languages
-                and platform_name
-                not in dub_by
-            ):
-
-                dub_by.append(
-                    platform_name
-                )
-
-        # -------------------------------------------------------------
-        # Title:
-        # Jikan canonical title preferred.
-        # Otherwise use user's search title.
-        # -------------------------------------------------------------
-
-        raw_title = (
-            mal_info.get("name")
-            if mal_info
-            else None
-        ) or anime_name
-
-        clean_name = (
-            self._clean_title(
-                raw_title
-            )
-        )
-
-        # -------------------------------------------------------------
-        # Language formatting
-        # -------------------------------------------------------------
-
-        formatted_languages = (
-            self._format_languages(
-                list(
-                    verified_languages
-                )
-            )
-        )
-
-        # -------------------------------------------------------------
-        # Hindi dub status
-        # -------------------------------------------------------------
-
-        hindi_dub = (
-            "Available"
-            if "Hindi"
-            in verified_languages
-            else "Not Verified"
-        )
-
-        # -------------------------------------------------------------
-        # Seasons
-        # -------------------------------------------------------------
-
-        formatted_seasons = (
-            self._format_season_numbers(
-                verified_seasons
-            )
-            if not is_movie_query
-            else None
-        )
-
-        # -------------------------------------------------------------
-        # Episodes
-        # -------------------------------------------------------------
-
-        formatted_episodes = None
-
-        if not is_movie_query:
-
-            if len(
-                platform_episodes
-            ) > 1:
-
-                lines = []
-
-                for (
-                    platform,
-                    episodes,
-                ) in platform_episodes.items():
-
-                    lines.append(
-                        f"• {platform}: "
-                        f"{episodes}"
-                    )
-
-                formatted_episodes = (
-                    "\n"
-                    + "\n".join(
-                        lines
-                    )
-                )
-
-            elif len(
-                platform_episodes
-            ) == 1:
-
-                formatted_episodes = (
-                    next(
-                        iter(
-                            platform_episodes.values()
-                        )
-                    )
-                )
-
-        # -------------------------------------------------------------
-        # Status
-        # -------------------------------------------------------------
-
-        status = (
-            self._merge_statuses(
-                verified_statuses
-            )
-            if verified_statuses
-            else "Not Verified"
-        )
-
-        # -------------------------------------------------------------
-        # FINAL RESULT
-        # -------------------------------------------------------------
-
-        return {
-            "name": clean_name,
-
-            "hindi_dub": hindi_dub,
-
-            "platform": " • ".join(
-                verified_platforms
-            ),
-
-            "dub_by": (
-                " • ".join(
-                    dub_by
-                )
-                if dub_by
-                else None
-            ),
-
-            "seasons": formatted_seasons,
-
-            "episodes": formatted_episodes,
-
-            "status": status,
-
-            "languages": formatted_languages,
-
-            # ---------------------------------------------------------
-            # Neutral metadata from Jikan only.
-            # ---------------------------------------------------------
-
-            "poster_url": (
-                mal_info.get(
-                    "poster_url"
-                )
-                if mal_info
-                else None
-            ),
-
-            "studio": (
-                mal_info.get(
-                    "studio"
-                )
-                if mal_info
-                else None
-            ),
-
-            "source": "DC",
-
-            "source_link": (
-                mal_info.get(
-                    "mal_url"
-                )
-                if mal_info
-                else None
-            ),
+        weekdays = {
+            "Monday": 0,
+            "Tuesday": 1,
+            "Wednesday": 2,
+            "Thursday": 3,
+            "Friday": 4,
+            "Saturday": 5,
+            "Sunday": 6,
         }
 
+        target_weekday = weekdays.get(str(day))
+        if target_weekday is None:
+            return None
+
+        # The datetime module's zoneinfo is part of Python 3.9+.
+        try:
+            from zoneinfo import ZoneInfo
+            source_tz = ZoneInfo(timezone_name)
+        except Exception:
+            source_tz = timezone.utc
+
+        try:
+            hour, minute = [
+                int(part)
+                for part in str(time_text).split(":")[:2]
+            ]
+        except Exception:
+            return None
+
+        now = datetime.now(source_tz)
+        days_ahead = (target_weekday - now.weekday()) % 7
+
+        candidate = (
+            now.replace(
+                hour=hour,
+                minute=minute,
+                second=0,
+                microsecond=0,
+            )
+            + timedelta(days=days_ahead)
+        )
+
+        # If today's scheduled time has already passed, use next week.
+        if candidate <= now:
+            candidate += timedelta(days=7)
+
+        return candidate.astimezone(timezone.utc)
+
     # =================================================================
-    # STATUS MERGING
+    # TITLE HELPERS
     # =================================================================
 
     @staticmethod
-    def _merge_statuses(
-        statuses: List[str],
-    ) -> str:
-
-        normalized = {
-            status
-            for status in statuses
-            if status
-            in {
-                "Ongoing",
-                "Completed",
-            }
-        }
-
-        # -------------------------------------------------------------
-        # Ongoing wins if sources disagree.
-        # -------------------------------------------------------------
-
-        if "Ongoing" in normalized:
-            return "Ongoing"
-
-        if "Completed" in normalized:
-            return "Completed"
-
-        return "Not Verified"
-
-    # =================================================================
-    # LANGUAGE EXTRACTION
-    # =================================================================
-
-    @staticmethod
-    def _extract_verified_languages(
-        text: str,
-        soup: Optional[BeautifulSoup] = None,
+    def _get_titles(
+        anime: Dict,
     ) -> List[str]:
 
-        """
-        Extract languages ONLY when the official page provides
-        evidence that the language is an audio/dub/voice track.
+        titles = []
 
-        Subtitle-only mentions are ignored.
-        """
+        for key in (
+            "title",
+            "title_english",
+            "title_japanese",
+        ):
 
-        if not text and not soup:
-            return []
-
-        # -------------------------------------------------------------
-        # Build searchable corpus
-        # -------------------------------------------------------------
-
-        corpus_parts: List[str] = []
-
-        if text:
-            corpus_parts.append(text)
-
-        if soup:
-
-            # Meta tags
-            for meta in soup.find_all("meta"):
-
-                corpus_parts.append(
-                    " ".join(
-                        [
-                            str(
-                                meta.get(
-                                    "name",
-                                    "",
-                                )
-                            ),
-                            str(
-                                meta.get(
-                                    "property",
-                                    "",
-                                )
-                            ),
-                            str(
-                                meta.get(
-                                    "itemprop",
-                                    "",
-                                )
-                            ),
-                            str(
-                                meta.get(
-                                    "content",
-                                    "",
-                                )
-                            ),
-                        ]
-                    )
-                )
-
-            # JSON-LD
-            for script in soup.find_all(
-                "script",
-                attrs={
-                    "type": "application/ld+json"
-                },
-            ):
-
-                try:
-
-                    corpus_parts.append(
-                        script.get_text(
-                            " ",
-                            strip=True,
-                        )
-                    )
-
-                except Exception:
-                    pass
-
-            # Useful data attributes
-            for tag in soup.find_all(
-                attrs=True
-            ):
-
-                for attr_name, attr_value in (
-                    tag.attrs.items()
-                ):
-
-                    if (
-                        attr_name.startswith(
-                            "data-"
-                        )
-                    ):
-
-                        if isinstance(
-                            attr_value,
-                            list,
-                        ):
-                            attr_value = " ".join(
-                                map(
-                                    str,
-                                    attr_value,
-                                )
-                            )
-
-                        corpus_parts.append(
-                            str(
-                                attr_value
-                            )
-                        )
-
-        full_corpus = " ".join(
-            corpus_parts
-        )
-
-        if not full_corpus:
-            return []
-
-        # -------------------------------------------------------------
-        # Normalize HTML entities and whitespace
-        # -------------------------------------------------------------
-
-        full_corpus = html.unescape(
-            full_corpus
-        )
-
-        full_corpus = re.sub(
-            r"\s+",
-            " ",
-            full_corpus,
-        )
-
-        found: List[str] = []
-
-        # -------------------------------------------------------------
-        # Language-specific detection
-        # -------------------------------------------------------------
-
-        for language in SUPPORTED_LANGUAGES:
-
-            lang = re.escape(
-                language
+            value = anime.get(
+                key
             )
 
-            patterns = [
-
-                # "Audio: Hindi"
-                rf"\b(?:audio|audio\s+language|audio\s+track)"
-                rf"\s*[:\-]?\s*"
-                rf"[^.;|]{{0,80}}\b{lang}\b",
-
-                # "Hindi Audio"
-                rf"\b{lang}\b"
-                rf"\s+(?:audio|audio\s+track)\b",
-
-                # "Hindi Dub"
-                rf"\b{lang}\b"
-                rf"\s+(?:dub|dubbed|dubbing)\b",
-
-                # "Dub: Hindi"
-                rf"\b(?:dub|dubbed|dubbing|voice)"
-                rf"\s*[:\-]?\s*"
-                rf"[^.;|]{{0,80}}\b{lang}\b",
-
-                # "Available in Hindi audio"
-                rf"\b(?:available|watch|stream)"
-                rf"\s+(?:in|with)"
-                rf"\s+"
-                rf"[^.;|]{{0,60}}\b{lang}\b"
-                rf"(?:\s+(?:audio|dub|dubbed))?",
-
-                # "Hindi version"
-                rf"\b{lang}\b"
-                rf"\s+(?:version|track)\b",
-
-                # "Hindi voice"
-                rf"\b{lang}\b"
-                rf"\s+voice\b",
-
-                # "Sub & Dub: Hindi"
-                rf"\bsub\s*(?:&|and|/)\s*dub\b"
-                rf"\s*[:\-]?\s*"
-                rf"[^.;|]{{0,100}}\b{lang}\b",
-            ]
-
-            language_verified = False
-
-            for pattern in patterns:
-
-                for match in re.finditer(
-                    pattern,
-                    full_corpus,
-                    re.I,
-                ):
-
-                    snippet = (
-                        match.group(0)
-                        .lower()
-                    )
-
-                    # -------------------------------------------------
-                    # Reject subtitle-only evidence.
-                    # -------------------------------------------------
-
-                    subtitle_only = (
-                        (
-                            "subtitle"
-                            in snippet
-                            or "subtitles"
-                            in snippet
-                            or "subbed"
-                            in snippet
-                        )
-                        and
-                        not any(
-                            token in snippet
-                            for token in (
-                                "audio",
-                                "dub",
-                                "dubbed",
-                                "dubbing",
-                                "voice",
-                            )
-                        )
-                    )
-
-                    if subtitle_only:
-                        continue
-
-                    language_verified = True
-                    break
-
-                if language_verified:
-                    break
-
-            if language_verified:
-                found.append(
-                    language
+            if value:
+                titles.append(
+                    value
                 )
 
-        return found
-
-    # =================================================================
-    # LANGUAGE FORMATTER
-    # =================================================================
-
-    @staticmethod
-    def _format_languages(
-        languages: List[str],
-    ) -> Optional[str]:
-
-        if not languages:
-            return None
-
-        language_set = {
-            language
-            for language in languages
-            if language in SUPPORTED_LANGUAGES
-        }
-
-        ordered = [
-            language
-            for language in SUPPORTED_LANGUAGES
-            if language in language_set
-        ]
-
-        return (
-            " • ".join(ordered)
-            if ordered
-            else None
-        )
-
-    # =================================================================
-    # SEASON PARSING
-    # =================================================================
-
-    @staticmethod
-    def _parse_season_numbers(
-        text: str,
-    ) -> List[int]:
-
-        if not text:
-            return []
-
-        seasons: Set[int] = set()
-
-        # -------------------------------------------------------------
-        # Explicit "Season 1"
-        # -------------------------------------------------------------
-
-        for match in re.finditer(
-            r"\bSeason\s*[-:]?\s*(\d{1,2})\b",
-            text,
-            re.I,
+        for item in anime.get(
+            "titles",
+            []
         ):
 
-            try:
+            if isinstance(
+                item,
+                dict
+            ):
 
-                number = int(
-                    match.group(1)
+                value = item.get(
+                    "title"
                 )
 
-                if 1 <= number <= 30:
-                    seasons.add(
-                        number
+                if value:
+                    titles.append(
+                        value
                     )
 
-            except (
-                ValueError,
-                IndexError,
-            ):
-                continue
-
-        # -------------------------------------------------------------
-        # Explicit "S1"
-        # -------------------------------------------------------------
-
-        for match in re.finditer(
-            r"(?<![A-Za-z0-9])S\s*"
-            r"(\d{1,2})"
-            r"(?![A-Za-z0-9])",
-            text,
-            re.I,
-        ):
-
-            try:
-
-                number = int(
-                    match.group(1)
-                )
-
-                if 1 <= number <= 30:
-                    seasons.add(
-                        number
-                    )
-
-            except (
-                ValueError,
-                IndexError,
-            ):
-                continue
-
-        return sorted(
-            seasons
+        return list(
+            dict.fromkeys(
+                titles
+            )
         )
 
-    # =================================================================
-    # SEASON FORMATTER
-    # =================================================================
-
     @staticmethod
-    def _format_season_numbers(
-        season_nums: List[int],
-    ) -> Optional[str]:
+    def _pick_title(
+        soup: BeautifulSoup,
+        fallback: str,
+    ) -> str:
 
-        if not season_nums:
-            return None
+        h1 = soup.find(
+            "h1"
+        )
 
-        unique_sorted = sorted(
-            {
-                number
-                for number in season_nums
-                if 1 <= number <= 30
+        if h1:
+
+            value = h1.get_text(
+                " ",
+                strip=True
+            )
+
+            if value:
+                return value
+
+        og_title = soup.find(
+                        "meta",
+            attrs={
+                "property": "og:title"
             }
         )
 
-        if not unique_sorted:
-            return None
+        if og_title:
 
-        return ", ".join(
-            f"Season {number}"
-            for number in unique_sorted
+            value = og_title.get(
+                "content"
+            )
+
+            if value:
+                return value
+
+        title_tag = soup.find(
+            "title"
         )
 
-    # =================================================================
-    # SEASON EXTRACTION
-    # =================================================================
+        if title_tag:
+
+            value = title_tag.get_text(
+                " ",
+                strip=True
+            )
+
+            if value:
+                return value
+
+        return fallback
 
     @staticmethod
-    def _extract_seasons(
-        text: str,
-        soup: Optional[BeautifulSoup] = None,
+    def _extract_og_image(
+        soup: BeautifulSoup,
     ) -> Optional[str]:
 
-        if not text:
-            return None
-
-        numbers = (
-            AnimeScraper._parse_season_numbers(
-                text
-            )
+        tag = soup.find(
+            "meta",
+            attrs={
+                "property": "og:image"
+            }
         )
 
-        return (
-            AnimeScraper._format_season_numbers(
-                numbers
-            )
-        )
+        if tag:
 
-    # =================================================================
-    # EPISODE EXTRACTION
-    # =================================================================
-
-    @staticmethod
-    def _extract_episodes(
-        text: str,
-        soup: Optional[BeautifulSoup] = None,
-    ) -> Optional[str]:
-
-        if not text:
-            return None
-
-        # -------------------------------------------------------------
-        # Normalize whitespace
-        # -------------------------------------------------------------
-
-        clean_text = re.sub(
-            r"\s+",
-            " ",
-            text,
-        )
-
-        # -------------------------------------------------------------
-        # 12/12
-        # -------------------------------------------------------------
-
-        match = re.search(
-            r"\b(\d{1,4})\s*/\s*(\d{1,4})\b",
-            clean_text,
-            re.I,
-        )
-
-        if match:
-
-            current = int(
-                match.group(1)
+            value = tag.get(
+                "content"
             )
 
-            total = int(
-                match.group(2)
-            )
-
-            if (
-                1 <= current <= 9999
-                and 1 <= total <= 9999
-                and current <= total
-            ):
-
-                return (
-                    f"{current}/{total}"
-                )
-
-        # -------------------------------------------------------------
-        # "12 episodes"
-        # -------------------------------------------------------------
-
-        match = re.search(
-            r"\b(\d{1,4})\s+episodes?\b",
-            clean_text,
-            re.I,
-        )
-
-        if match:
-
-            number = int(
-                match.group(1)
-            )
-
-            if 1 <= number <= 9999:
-                return (
-                    f"{number} episodes"
-                )
-
-        # -------------------------------------------------------------
-        # "Episodes: 12"
-        # -------------------------------------------------------------
-
-        match = re.search(
-            r"\bepisodes?\s*[:\-]?\s*"
-            r"(\d{1,4})\b",
-            clean_text,
-            re.I,
-        )
-
-        if match:
-
-            number = int(
-                match.group(1)
-            )
-
-            if 1 <= number <= 9999:
-                return (
-                    f"{number} episodes"
-                )
-
-        # -------------------------------------------------------------
-        # "12 released"
-        # -------------------------------------------------------------
-
-        match = re.search(
-            r"\b(\d{1,4})\s+"
-            r"(?:episodes?\s+)?released\b",
-            clean_text,
-            re.I,
-        )
-
-        if match:
-
-            number = int(
-                match.group(1)
-            )
-
-            if 1 <= number <= 9999:
-                return (
-                    f"{number} released"
-                )
-
-        # -------------------------------------------------------------
-        # "Episode 12"
-        #
-        # This is NOT treated as total episode count unless the page
-        # explicitly describes it as released/current/available.
-        # -------------------------------------------------------------
-
-        match = re.search(
-            r"\bepisode\s+"
-            r"(\d{1,4})"
-            r"\s+"
-            r"(?:released|available|out)\b",
-            clean_text,
-            re.I,
-        )
-
-        if match:
-
-            number = int(
-                match.group(1)
-            )
-
-            if 1 <= number <= 9999:
-                return (
-                    f"{number} released"
-                )
+            if value:
+                return value.strip()
 
         return None
 
     # =================================================================
-    # STATUS EXTRACTION
-    # =================================================================
-
-    @staticmethod
-    def _extract_status(
-        text: str,
-        soup: Optional[BeautifulSoup] = None,
-    ) -> Optional[str]:
-
-        if not text:
-            return None
-
-        clean_text = re.sub(
-            r"\s+",
-            " ",
-            text,
-        ).lower()
-
-        # -------------------------------------------------------------
-        # Explicit ongoing indicators
-        # -------------------------------------------------------------
-
-        ongoing_patterns = [
-            r"\bongoing\b",
-            r"\bcurrently airing\b",
-            r"\bcurrently streaming\b",
-            r"\bairing now\b",
-            r"\bnew episode every\b",
-        ]
-
-        for pattern in ongoing_patterns:
-
-            if re.search(
-                pattern,
-                clean_text,
-                re.I,
-            ):
-                return "Ongoing"
-
-        # -------------------------------------------------------------
-        # Explicit completion indicators
-        # -------------------------------------------------------------
-
-        completed_patterns = [
-            r"\bcompleted\b",
-            r"\bcomplete series\b",
-            r"\bseries complete\b",
-            r"\bfinished\b",
-            r"\bended\b",
-            r"\bfinal episode\b",
-            r"\bseries finale\b",
-        ]
-
-        for pattern in completed_patterns:
-
-            if re.search(
-                pattern,
-                clean_text,
-                re.I,
-            ):
-                return "Completed"
-
-        return None
-
-    # =================================================================
-    # TITLE NORMALIZATION
+    # NORMALIZATION / MATCHING
     # =================================================================
 
     @staticmethod
@@ -2643,73 +2243,20 @@ class AnimeScraper:
             text or ""
         ).lower()
 
-        # -------------------------------------------------------------
-        # HTML entities / common Unicode variants
-        # -------------------------------------------------------------
+        text = text.replace(
+            "-",
+            " "
+        )
 
-        text = html.unescape(
+        text = re.sub(
+            r"[^a-z0-9 ]+",
+            " ",
             text
-        )
-
-        text = text.replace(
-            "×",
-            "x",
-        )
-
-        text = text.replace(
-            "✕",
-            "x",
-        )
-
-        text = text.replace(
-            "–",
-            " ",
-        )
-
-        text = text.replace(
-            "—",
-            " ",
-        )
-
-        # -------------------------------------------------------------
-        # Common title variation
-        # -------------------------------------------------------------
-
-        text = re.sub(
-            r"\bspy\s*x\s*family\b",
-            "spy family",
-            text,
-            flags=re.I,
-        )
-
-        # -------------------------------------------------------------
-        # Remove harmless article differences.
-        # -------------------------------------------------------------
-
-        text = re.sub(
-            r"\bthe\b",
-            " ",
-            text,
-            flags=re.I,
-        )
-
-        # -------------------------------------------------------------
-        # Remove punctuation.
-        # -------------------------------------------------------------
-
-        text = re.sub(
-            r"[^a-z0-9]+",
-            " ",
-            text,
         )
 
         return " ".join(
             text.split()
         )
-
-    # =================================================================
-    # TITLE MATCHING
-    # =================================================================
 
     @staticmethod
     def _title_matches(
@@ -2717,1920 +2264,780 @@ class AnimeScraper:
         query: str,
     ) -> bool:
 
-        if not title or not query:
-            return False
-
-        normalized_title = (
-            AnimeScraper._normalize(
-                title
-            )
+        a = AnimeScraper._normalize(
+            title
         )
 
-        normalized_query = (
-            AnimeScraper._normalize(
-                query
-            )
+        b = AnimeScraper._normalize(
+            query
         )
 
-        if (
-            not normalized_title
-            or not normalized_query
-        ):
+        if not b:
             return False
 
-        # -------------------------------------------------------------
-        # Exact match
-        # -------------------------------------------------------------
-
-        if (
-            normalized_title
-            == normalized_query
-        ):
+        if a == b:
             return True
 
-        # -------------------------------------------------------------
-        # Query contained inside title.
-        # -------------------------------------------------------------
-
-        if (
-            normalized_query
-            in normalized_title
-        ):
+        if b in a:
             return True
 
-        title_words = set(
-            normalized_title.split()
-        )
-
-        query_words = set(
-            normalized_query.split()
-        )
-
-        if not title_words or not query_words:
-            return False
-
-        # -------------------------------------------------------------
-        # Very short titles need stricter matching.
-        # Prevents false positives for names such as:
-        # "One", "Blue", "Fire", etc.
-        # -------------------------------------------------------------
-
-        if len(query_words) <= 2:
-
-            return query_words.issubset(
-                title_words
-            )
-
-        # -------------------------------------------------------------
-        # Longer titles:
-        # At least 75% of query tokens must match.
-        # -------------------------------------------------------------
-
-        overlap = (
-            query_words
-            .intersection(
-                title_words
+        return set(
+            b.split()
+        ).issubset(
+            set(
+                a.split()
             )
         )
-
-        ratio = (
-            len(overlap)
-            / len(query_words)
-        )
-
-        return ratio >= 0.75
-
-    # =================================================================
-    # MOVIE DETECTION
-    # =================================================================
 
     @staticmethod
-    def _is_movie_result(
-        title: str,
+    def _query_present(
+        anime_name: str,
+        text: str,
+    ) -> bool:
+
+        query = AnimeScraper._normalize(
+            anime_name
+        )
+
+        normalized = AnimeScraper._normalize(
+            text
+        )
+
+        return (
+            query in normalized
+            or set(
+                query.split()
+            ).issubset(
+                set(
+                    normalized.split()
+                )
+            )
+        )
+
+    @staticmethod
+    def _is_generic_title(
+        title: Optional[str],
     ) -> bool:
 
         if not title:
-            return False
+            return True
 
-        return bool(
-            re.search(
-                r"\b("
-                r"movie|film|"
-                r"theatrical\s+release|"
-                r"feature\s+film"
-                r")\b",
-                title,
-                re.I,
+        value = title.strip().lower()
+
+        return (
+            value.startswith(
+                "search results for:"
             )
+            or value.startswith(
+                "results for:"
+            )
+            or value in {
+                "search",
+                "anime",
+                "anime schedule",
+                "search results",
+            }
         )
-
-    # =================================================================
-    # TITLE CLEANING
-    # =================================================================
 
     @staticmethod
     def _clean_title(
         title: str,
     ) -> str:
 
-        if not title:
-            return ""
-
-        title = html.unescape(
-            str(title)
+        title = re.sub(
+            r"^search\s+results?\s+for:\s*",
+            "",
+            title or "",
+            flags=re.I
         )
 
-        # -------------------------------------------------------------
-        # Remove common search-result prefixes.
-        # -------------------------------------------------------------
-
         title = re.sub(
-            r"^\s*search\s+results?"
-            r"\s*(?:for)?\s*[:\-]\s*",
+            r"\s+[-|–]\s+AnimeDubHindi.*$",
             "",
             title,
-            flags=re.I,
+            flags=re.I
         )
 
-        # -------------------------------------------------------------
-        # Remove source suffixes.
-        # -------------------------------------------------------------
-
         title = re.sub(
-            r"\s+[-|–—]\s+"
-            r"(?:Crunchyroll|Netflix|"
-            r"Prime\s+Video|"
-            r"JioHotstar|Hotstar|"
-            r"MX\s+Player|"
-            r"ZEE5|SonyLIV|YouTube)"
-            r".*$",
+            r"\s+Hindi\s+Dub.*$",
             "",
             title,
-            flags=re.I,
+            flags=re.I
         )
 
-        # -------------------------------------------------------------
-        # Remove language labels only when they are standalone
-        # metadata markers.
-        # -------------------------------------------------------------
-
-        title = re.sub(
-            r"\b("
-            r"Hindi|English|Tamil|Telugu|Japanese|"
-            r"Malayalam|Bangla|Bengali|Kannada|"
-            r"Chinese|Korean|Marathi"
-            r")\b",
-            "",
-            title,
-            flags=re.I,
-        )
-
-        title = re.sub(
-            r"\b("
-            r"multi\s+audio|"
-            r"dual\s+audio|"
-            r"multi\s+language"
-            r")\b",
-            "",
-            title,
-            flags=re.I,
-        )
-
-        # -------------------------------------------------------------
-        # Remove common video metadata.
-        # -------------------------------------------------------------
-
-        title = re.sub(
-            r"\b("
-            r"official\s+trailer|"
-            r"official\s+video|"
-            r"trailer|"
-            r"episode\s+\d+|"
-            r"ep\.?\s*\d+"
-            r")\b",
-            "",
-            title,
-            flags=re.I,
-        )
-
-        # -------------------------------------------------------------
-        # Remove empty bracket groups.
-        # -------------------------------------------------------------
-
-        title = re.sub(
-            r"\(\s*\)",
-            "",
-            title,
-        )
-
-        title = re.sub(
-            r"\[\s*\]",
-            "",
-            title,
-        )
-
-        title = re.sub(
-            r"\{\s*\}",
-            "",
-            title,
-        )
-
-        # -------------------------------------------------------------
-        # Clean separators without destroying normal title text.
-        # -------------------------------------------------------------
-
-        title = re.sub(
-            r"\s*[\|–—]+\s*",
-            " ",
-            title,
-        )
-
-        title = re.sub(
-            r"\s{2,}",
-            " ",
-            title,
-        )
-
-        return title.strip(
-            " -|:,."
-        )
-
+        return title.strip()      
+        
     # =================================================================
-    # OFFICIAL PAGE TITLE EXTRACTION
+    # STUDIO
     # =================================================================
 
     @staticmethod
-    def _extract_official_page_title(
-        soup: BeautifulSoup,
-    ) -> str:
-
-        if not soup:
-            return ""
-
-        # -------------------------------------------------------------
-        # OpenGraph title is generally closer to the actual content
-        # title than <title>, especially on streaming sites.
-        # -------------------------------------------------------------
-
-        og_title = soup.find(
-            "meta",
-            attrs={
-                "property": "og:title"
-            },
-        )
-
-        if og_title:
-
-            content = og_title.get(
-                "content"
-            )
-
-            if content:
-
-                content = (
-                    content.strip()
-                )
-
-                if content:
-                    return content
-
-        # -------------------------------------------------------------
-        # H1 fallback
-        # -------------------------------------------------------------
-
-        h1 = soup.find(
-            "h1"
-        )
-
-        if h1:
-
-            text = h1.get_text(
-                " ",
-                strip=True,
-            )
-
-            if text:
-                return text
-
-        # -------------------------------------------------------------
-        # HTML title fallback
-        # -------------------------------------------------------------
-
-        title_tag = soup.find(
-            "title"
-        )
-
-        if title_tag:
-
-            text = title_tag.get_text(
-                " ",
-                strip=True,
-            )
-
-            if text:
-                return text
-
-        return ""
-
-    # =================================================================
-    # STRUCTURED DATA HELPERS
-    # =================================================================
-
-    @staticmethod
-    def _extract_json_ld(
-        soup: Optional[BeautifulSoup],
-    ) -> List[Dict]:
-
-        if not soup:
-            return []
-
-        results: List[Dict] = []
-
-        scripts = soup.find_all(
-            "script",
-            attrs={
-                "type": re.compile(
-                    r"application/ld\+json",
-                    re.I,
-                )
-            },
-        )
-
-        for script in scripts:
-
-            raw = script.get_text(
-                " ",
-                strip=True,
-            )
-
-            if not raw:
-                continue
-
-            try:
-
-                data = json.loads(
-                    raw
-                )
-
-            except (
-                json.JSONDecodeError,
-                TypeError,
-                ValueError,
-            ):
-                continue
-
-            # ---------------------------------------------------------
-            # JSON-LD can be a dictionary.
-            # ---------------------------------------------------------
-
-            if isinstance(
-                data,
-                dict,
-            ):
-
-                results.append(
-                    data
-                )
-
-                # -----------------------------------------------------
-                # Some documents use @graph.
-                # -----------------------------------------------------
-
-                graph = data.get(
-                    "@graph"
-                )
-
-                if isinstance(
-                    graph,
-                    list,
-                ):
-
-                    for item in graph:
-
-                        if isinstance(
-                            item,
-                            dict,
-                        ):
-                            results.append(
-                                item
-                            )
-
-            # ---------------------------------------------------------
-            # Or directly an array.
-            # ---------------------------------------------------------
-
-            elif isinstance(
-                data,
-                list,
-            ):
-
-                for item in data:
-
-                    if isinstance(
-                        item,
-                        dict,
-                    ):
-                        results.append(
-                            item
-                        )
-
-        return results
-
-    # =================================================================
-    # JSON-LD TEXT EXTRACTION
-    # =================================================================
-
-    @staticmethod
-    def _json_ld_text(
-        soup: Optional[BeautifulSoup],
-    ) -> str:
-
-        objects = (
-            AnimeScraper._extract_json_ld(
-                soup
-            )
-        )
-
-        if not objects:
-            return ""
-
-        parts: List[str] = []
-
-        for obj in objects:
-
-            try:
-
-                parts.append(
-                    json.dumps(
-                        obj,
-                        ensure_ascii=False,
-                    )
-                )
-
-            except (
-                TypeError,
-                ValueError,
-            ):
-                continue
-
-        return " ".join(
-            parts
-        )
-
-    # =================================================================
-    # SEARCH CORPUS BUILDER
-    # =================================================================
-
-    @staticmethod
-    def _build_search_corpus(
+    def _extract_studio(
         text: str,
-        soup: Optional[BeautifulSoup],
-    ) -> str:
+    ) -> Optional[str]:
 
-        parts: List[str] = []
+        patterns = [
+            r"(?:animation\s+)?studio\s*[:\-]\s*([^|\n]{1,120})",
+            r"production\s+studio\s*[:\-]\s*([^|\n]{1,120})",
+            r"produced\s+by\s*[:\-]\s*([^|\n]{1,120})",
+        ]
 
-        if text:
-            parts.append(
-                text
+        for pattern in patterns:
+            match = re.search(
+                pattern,
+                text or "",
+                re.I
             )
 
-        if soup:
-
-            # ---------------------------------------------------------
-            # Metadata
-            # ---------------------------------------------------------
-
-            for meta in soup.find_all(
-                "meta"
-            ):
-
-                values = []
-
-                for attribute in (
-                    "name",
-                    "property",
-                    "itemprop",
-                    "content",
-                ):
-
-                    value = meta.get(
-                        attribute
-                    )
-
-                    if value:
-                        values.append(
-                            str(value)
-                        )
-
-                if values:
-                    parts.append(
-                        " ".join(
-                            values
-                        )
-                    )
-
-            # ---------------------------------------------------------
-            # JSON-LD
-            # ---------------------------------------------------------
-
-            json_text = (
-                AnimeScraper._json_ld_text(
-                    soup
-                )
-            )
-
-            if json_text:
-                parts.append(
-                    json_text
-                )
-
-        corpus = " ".join(
-            parts
-        )
-
-        corpus = html.unescape(
-            corpus
-        )
-
-        corpus = re.sub(
-            r"\s+",
-            " ",
-            corpus,
-        )
-
-        return corpus.strip()
-
-    # =================================================================
-    # URL HELPERS
-    # =================================================================
-
-    @staticmethod
-    def _same_url(
-        first_url: str,
-        second_url: str,
-    ) -> bool:
-
-        try:
-
-            first = urlparse(
-                first_url
-            )
-
-            second = urlparse(
-                second_url
-            )
-
-            return (
-                first.scheme.lower()
-                == second.scheme.lower()
-                and (
-                    first.hostname or ""
-                ).lower()
-                == (
-                    second.hostname or ""
-                ).lower()
-                and (
-                    first.path.rstrip("/")
-                    == second.path.rstrip("/")
-                )
-            )
-
-        except Exception:
-            return False
-
-    # =================================================================
-    # SOURCE URL EXTRACTION
-    # =================================================================
-
-    @staticmethod
-    def _extract_source_urls(
-        soup: Optional[BeautifulSoup],
-        base_url: str,
-    ) -> List[str]:
-
-        if not soup:
-            return []
-
-        urls: List[str] = []
-
-        # -------------------------------------------------------------
-        # Canonical
-        # -------------------------------------------------------------
-
-        canonical = (
-            AnimeScraper._extract_canonical_url(
-                soup,
-                base_url,
-            )
-        )
-
-        if canonical:
-            urls.append(
-                canonical
-            )
-
-        # -------------------------------------------------------------
-        # OpenGraph
-        # -------------------------------------------------------------
-
-        og_url = soup.find(
-            "meta",
-            attrs={
-                "property": "og:url"
-            },
-        )
-
-        if og_url:
-
-            content = og_url.get(
-                "content"
-            )
-
-            if content:
-
-                urls.append(
-                    urljoin(
-                        base_url,
-                        content,
-                    )
-                )
-
-        # -------------------------------------------------------------
-        # Deduplicate
-        # -------------------------------------------------------------
-
-        unique_urls = []
-
-        for url in urls:
-
-            if url and url not in unique_urls:
-                unique_urls.append(
-                    url
-                )
-
-        return unique_urls
-
-    # =================================================================
-    # TEXT / DOM UTILITIES
-    # =================================================================
-
-    @staticmethod
-    def _get_tag_text(
-        soup: Optional[BeautifulSoup],
-        tag_name: str,
-    ) -> str:
-
-        if not soup:
-            return ""
-
-        tag = soup.find(
-            tag_name
-        )
-
-        if not tag:
-            return ""
-
-        return tag.get_text(
-            " ",
-            strip=True,
-        )
-
-    # =================================================================
-    # META CONTENT EXTRACTION
-    # =================================================================
-
-    @staticmethod
-    def _extract_meta_content(
-        soup: Optional[BeautifulSoup],
-    ) -> List[str]:
-
-        if not soup:
-            return []
-
-        values: List[str] = []
-
-        for meta in soup.find_all(
-            "meta"
-        ):
-
-            for attribute in (
-                "content",
-                "name",
-                "property",
-                "itemprop",
-            ):
-
-                value = meta.get(
-                    attribute
-                )
-
-                if value:
-                    values.append(
-                        str(value)
-                    )
-
-        return values
-
-    # =================================================================
-    # JSON / SCRIPT TEXT EXTRACTION
-    # =================================================================
-
-    @staticmethod
-    def _extract_script_text(
-        soup: Optional[BeautifulSoup],
-    ) -> List[str]:
-
-        if not soup:
-            return []
-
-        values: List[str] = []
-
-        for script in soup.find_all(
-            "script"
-        ):
-
-            try:
-
-                text = script.get_text(
+            if match:
+                value = re.sub(
+                    r"\s+",
                     " ",
-                    strip=True,
-                )
-
-            except Exception:
-                continue
-
-            if text:
-                values.append(
-                    text
-                )
-
-        return values
-
-    # =================================================================
-    # PAGE TEXT NORMALIZATION
-    # =================================================================
-
-    @staticmethod
-    def _clean_page_text(
-        text: str,
-    ) -> str:
-
-        if not text:
-            return ""
-
-        text = html.unescape(
-            text
-        )
-
-        # Remove zero-width characters.
-        text = re.sub(
-            r"[\u200b-\u200d\ufeff]",
-            "",
-            text,
-        )
-
-        # Normalize whitespace.
-        text = re.sub(
-            r"\s+",
-            " ",
-            text,
-        )
-
-        return text.strip()
-
-    # =================================================================
-    # LANGUAGE EVIDENCE HELPERS
-    # =================================================================
-
-    @staticmethod
-    def _has_audio_language_evidence(
-        corpus: str,
-        language: str,
-    ) -> bool:
-
-        if not corpus or not language:
-            return False
-
-        lang = re.escape(
-            language
-        )
-
-        # -------------------------------------------------------------
-        # Strong audio/dub relationships.
-        # -------------------------------------------------------------
-
-        strong_patterns = [
-
-            rf"\b(?:audio|audio\s+track|"
-            rf"audio\s+language)\b"
-            rf"[^.;|]{{0,80}}\b{lang}\b",
-
-            rf"\b{lang}\b"
-            rf"[^.;|]{{0,40}}"
-            rf"\b(?:audio|audio\s+track)\b",
-
-            rf"\b(?:dub|dubbed|dubbing|"
-            rf"voice|voice\s+track)\b"
-            rf"[^.;|]{{0,80}}\b{lang}\b",
-
-            rf"\b{lang}\b"
-            rf"[^.;|]{{0,40}}"
-            rf"\b(?:dub|dubbed|dubbing|voice)\b",
-        ]
-
-        for pattern in strong_patterns:
-
-            if re.search(
-                pattern,
-                corpus,
-                re.I,
-            ):
-                return True
-
-        # -------------------------------------------------------------
-        # Explicit language-selection UI wording.
-        # -------------------------------------------------------------
-
-        ui_patterns = [
-
-            rf"\bselect\s+audio\b"
-            rf"[^.;|]{{0,100}}\b{lang}\b",
-
-            rf"\baudio\s+languages?\b"
-            rf"[^.;|]{{0,100}}\b{lang}\b",
-
-            rf"\blanguages?\b"
-            rf"[^.;|]{{0,80}}"
-            rf"\b{lang}\b"
-            rf"[^.;|]{{0,50}}"
-            rf"\baudio\b",
-
-            rf"\b{lang}\b"
-            rf"[^.;|]{{0,80}}"
-            rf"\b(?:version|track)\b",
-        ]
-
-        for pattern in ui_patterns:
-
-            if re.search(
-                pattern,
-                corpus,
-                re.I,
-            ):
-                return True
-
-        return False
-
-    # =================================================================
-    # TITLE EVIDENCE
-    # =================================================================
-
-    @staticmethod
-    def _extract_title_candidates(
-        soup: Optional[BeautifulSoup],
-    ) -> List[str]:
-
-        if not soup:
-            return []
-
-        candidates: List[str] = []
-
-        # -------------------------------------------------------------
-        # OG title
-        # -------------------------------------------------------------
-
-        og_title = soup.find(
-            "meta",
-            attrs={
-                "property": "og:title"
-            },
-        )
-
-        if og_title:
-
-            value = og_title.get(
-                "content"
-            )
-
-            if value:
-                candidates.append(
-                    value.strip()
-                )
-
-        # -------------------------------------------------------------
-        # H1
-        # -------------------------------------------------------------
-
-        for h1 in soup.find_all(
-            "h1"
-        ):
-
-            value = h1.get_text(
-                " ",
-                strip=True,
-            )
-
-            if value:
-                candidates.append(
-                    value
-                )
-
-        # -------------------------------------------------------------
-        # Title
-        # -------------------------------------------------------------
-
-        if soup.title:
-
-            value = soup.title.get_text(
-                " ",
-                strip=True,
-            )
-
-            if value:
-                candidates.append(
-                    value
-                )
-
-        # -------------------------------------------------------------
-        # Deduplicate
-        # -------------------------------------------------------------
-
-        unique = []
-
-        for candidate in candidates:
-
-            if candidate not in unique:
-                unique.append(
-                    candidate
-                )
-
-        return unique
-
-    # =================================================================
-    # URL PATH ANALYSIS
-    # =================================================================
-
-    @staticmethod
-    def _url_path_tokens(
-        url: str,
-    ) -> Set[str]:
-
-        if not url:
-            return set()
-
-        try:
-
-            parsed = urlparse(
-                url
-            )
-
-            path = unquote(
-                parsed.path or ""
-            ).lower()
-
-            tokens = re.findall(
-                r"[a-z0-9]+",
-                path,
-            )
-
-            return set(
-                tokens
-            )
-
-        except Exception:
-            return set()
-
-    # =================================================================
-    # YOUTUBE URL VALIDATION
-    # =================================================================
-
-    @staticmethod
-    def _is_youtube_video_url(
-        url: str,
-    ) -> bool:
-
-        try:
-
-            parsed = urlparse(
-                url
-            )
-
-            hostname = (
-                parsed.hostname or ""
-            ).lower()
-
-            if hostname not in {
-                "youtube.com",
-                "www.youtube.com",
-                "m.youtube.com",
-            }:
-                return False
-
-            if (
-                parsed.path.lower()
-                != "/watch"
-            ):
-                return False
-
-            params = parse_qs(
-                parsed.query
-            )
-
-            video_ids = params.get(
-                "v",
-                [],
-            )
-
-            return bool(
-                video_ids
-                and video_ids[0].strip()
-            )
-
-        except Exception:
-            return False
-
-    # =================================================================
-    # YOUTUBE PLAYLIST URL VALIDATION
-    # =================================================================
-
-    @staticmethod
-    def _is_youtube_playlist_url(
-        url: str,
-    ) -> bool:
-
-        try:
-
-            parsed = urlparse(
-                url
-            )
-
-            hostname = (
-                parsed.hostname or ""
-            ).lower()
-
-            if hostname not in {
-                "youtube.com",
-                "www.youtube.com",
-                "m.youtube.com",
-            }:
-                return False
-
-            params = parse_qs(
-                parsed.query
-            )
-
-            playlist_ids = params.get(
-                "list",
-                [],
-            )
-
-            return bool(
-                playlist_ids
-                and playlist_ids[0].strip()
-            )
-
-        except Exception:
-            return False
-
-    # =================================================================
-    # URL QUALITY CHECK
-    # =================================================================
-
-    @staticmethod
-    def _has_specific_content_path(
-        url: str,
-    ) -> bool:
-
-        if not url:
-            return False
-
-        try:
-
-            parsed = urlparse(
-                url
-            )
-
-            path = (
-                parsed.path or ""
-            ).strip("/").lower()
-
-            if not path:
-                return False
-
-            generic_segments = {
-                "home",
-                "search",
-                "browse",
-                "catalog",
-                "login",
-                "signin",
-                "register",
-                "signup",
-                "error",
-                "404",
-            }
-
-            segments = [
-                segment
-                for segment in path.split("/")
-                if segment
-            ]
-
-            if not segments:
-                return False
-
-            if all(
-                segment in generic_segments
-                for segment in segments
-            ):
-                return False
-
-            return True
-
-        except Exception:
-            return False
-
-    # =================================================================
-    # OFFICIAL SOURCE DOMAIN SANITIZATION
-    # =================================================================
-
-    @staticmethod
-    def _sanitize_official_url(
-        url: str,
-        allowed_domains: List[str],
-    ) -> Optional[str]:
-
-        if not url:
-            return None
-
-        url = html.unescape(
-            unquote(
-                url.strip()
-            )
-        )
-
-        if not url.startswith(
-            ("http://", "https://")
-        ):
-            return None
-
-        # -------------------------------------------------------------
-        # Only HTTPS should be accepted for final official URLs.
-        # -------------------------------------------------------------
-
-        parsed = urlparse(
-            url
-        )
-
-        if parsed.scheme.lower() != "https":
-            return None
-
-        if not AnimeScraper._is_allowed_domain(
-            url,
-            allowed_domains,
-        ):
-            return None
-
-        return url
-
-    # =================================================================
-    # SAFE URL JOIN
-    # =================================================================
-
-    @staticmethod
-    def _safe_urljoin(
-        base_url: str,
-        target_url: str,
-        allowed_domains: List[str],
-    ) -> Optional[str]:
-
-        if not base_url or not target_url:
-            return None
-
-        try:
-
-            joined = urljoin(
-                base_url,
-                target_url,
-            )
-
-            return AnimeScraper._sanitize_official_url(
-                joined,
-                allowed_domains,
-            )
-
-        except Exception:
-            return None
-
-    # =================================================================
-    # RESPONSE VALIDATION
-    # =================================================================
-
-    @staticmethod
-    def _is_html_response(
-        response: requests.Response,
-    ) -> bool:
-
-        try:
-
-            content_type = (
-                response.headers.get(
-                    "Content-Type",
-                    "",
-                )
-                .lower()
-            )
-
-            return (
-                "text/html"
-                in content_type
-                or "application/xhtml+xml"
-                in content_type
-                or not content_type
-            )
-
-        except Exception:
-            return False
-
-    # =================================================================
-    # PAGE RESPONSE SAFETY CHECK
-    # =================================================================
-
-    @staticmethod
-    def _validate_page_response(
-        response: requests.Response,
-        allowed_domains: List[str],
-    ) -> bool:
-
-        if not response:
-            return False
-
-        if response.status_code != 200:
-            return False
-
-        if not AnimeScraper._is_html_response(
-            response
-        ):
-            return False
-
-        final_url = (
-            response.url
-            or ""
-        )
-
-        if not AnimeScraper._is_allowed_domain(
-            final_url,
-            allowed_domains,
-        ):
-            return False
-
-        return True
-
-    # =================================================================
-    # PAGE CONTENT QUALITY
-    # =================================================================
-
-    @staticmethod
-    def _has_meaningful_page_content(
-        soup: Optional[BeautifulSoup],
-        minimum_length: int = 80,
-    ) -> bool:
-
-        if not soup:
-            return False
-
-        text = soup.get_text(
-            " ",
-            strip=True,
-        )
-
-        text = re.sub(
-            r"\s+",
-            " ",
-            text,
-        ).strip()
-
-        return len(
-            text
-        ) >= minimum_length
-
-    # =================================================================
-    # ERROR PAGE DETECTION
-    # =================================================================
-
-    @staticmethod
-    def _looks_like_error_page(
-        soup: Optional[BeautifulSoup],
-    ) -> bool:
-
-        if not soup:
-            return True
-
-        title = ""
-
-        if soup.title:
-            title = soup.title.get_text(
-                " ",
-                strip=True,
-            ).lower()
-
-        text = soup.get_text(
-            " ",
-            strip=True,
-        ).lower()
-
-        error_patterns = [
-            "404 not found",
-            "page not found",
-            "something went wrong",
-            "content unavailable",
-            "video unavailable",
-            "this page isn't available",
-            "this content is not available",
-        ]
-
-        for pattern in error_patterns:
-
-            if (
-                pattern in title
-                or pattern in text[:3000]
-            ):
-                return True
-
-        return False
-
-            # =================================================================
-    # CANONICAL URL EXTRACTION
-    # =================================================================
-
-    @staticmethod
-    def _extract_canonical_url(
-        soup: Optional[BeautifulSoup],
-        base_url: Optional[str] = None,
-    ) -> Optional[str]:
-
-        if not soup:
-            return None
-
-        # -------------------------------------------------------------
-        # Prefer <link rel="canonical">
-        # -------------------------------------------------------------
-
-        canonical_tag = soup.find(
-            "link",
-            attrs={
-                "rel": re.compile(
-                    r"canonical",
-                    re.I,
-                )
-            },
-        )
-
-        if canonical_tag:
-
-            href = canonical_tag.get(
-                "href"
-            )
-
-            if href:
-
-                href = href.strip()
-
-                if base_url:
-                    href = urljoin(
-                        base_url,
-                        href,
-                    )
-
-                return href
-
-        # -------------------------------------------------------------
-        # Fallback to og:url
-        # -------------------------------------------------------------
-
-        og_url = soup.find(
-            "meta",
-            attrs={
-                "property": "og:url"
-            },
-        )
-
-        if og_url:
-
-            content = og_url.get(
-                "content"
-            )
-
-            if content:
-
-                content = content.strip()
-
-                if base_url:
-                    content = urljoin(
-                        base_url,
-                        content,
-                    )
-
-                return content
+                    match.group(1)
+                ).strip(" :-|•,")
+
+                if value and len(value) <= 120:
+                    return value
 
         return None
 
     # =================================================================
-    # GENERIC LANDING PAGE DETECTION
+    # DUB BY
     # =================================================================
 
     @staticmethod
-    def _is_generic_landing_page(
-        url: str,
-        soup: BeautifulSoup,
-    ) -> bool:
+    def _extract_dub_by(
+        text: str,
+    ) -> Optional[str]:
 
-        if not url:
-            return True
-
-        try:
-
-            parsed = urlparse(
-                url
-            )
-
-            path = (
-                parsed.path or ""
-            ).strip(
-                "/"
-            ).lower()
-
-            query = (
-                parsed.query or ""
-            ).lower()
-
-            hostname = (
-                parsed.hostname or ""
-            ).lower()
-
-        except Exception:
-            return True
-
-        # -------------------------------------------------------------
-        # Root page
-        # -------------------------------------------------------------
-
-        if not path:
-            return True
-
-        # -------------------------------------------------------------
-        # Generic routes
-        # -------------------------------------------------------------
-
-        generic_paths = {
-            "login",
-            "signin",
-            "sign-in",
-            "register",
-            "signup",
-            "sign-up",
-            "browse",
-            "search",
-            "home",
-            "catalog",
-            "error",
-            "404",
-        }
-
-        path_parts = [
-            part
-            for part in path.split("/")
-            if part
+        patterns = [
+            (
+                r"official\s+dub(?:bed)?\s+by"
+                r"\s*[:\-]?\s*"
+                r"(.{1,120}?)"
+                r"(?=\s+(?:encoder|quality|"
+                r"subtitle|audio|genres|total|"
+                r"episode|$))"
+            ),
+            (
+                r"dub(?:bed)?\s+by"
+                r"\s*[:\-]?\s*"
+                r"(.{1,120}?)"
+                r"(?=\s+(?:encoder|quality|"
+                r"subtitle|audio|genres|total|"
+                r"episode|$))"
+            ),
+            (
+                r"dubbing\s+(?:studio|by)"
+                r"\s*[:\-]?\s*"
+                r"(.{1,120}?)"
+                r"(?=\s+(?:encoder|quality|"
+                r"subtitle|audio|genres|total|"
+                r"episode|$))"
+            ),
         ]
 
-        if (
-            len(path_parts) == 1
-            and path_parts[0]
-            in generic_paths
-        ):
-            return True
+        for pattern in patterns:
 
-        # -------------------------------------------------------------
-        # YouTube channel root.
-        #
-        # A channel itself is not enough evidence that a particular
-        # anime exists on that channel.
-        # -------------------------------------------------------------
-
-        if (
-            "youtube.com"
-            in hostname
-        ):
-
-            if (
-                path.startswith("@")
-                and "/watch"
-                not in path
-                and "list="
-                not in query
-            ):
-                return True
-
-            if path in {
-                "channel",
-                "c",
-                "user",
-            }:
-                return True
-
-        # -------------------------------------------------------------
-        # Generic page title detection
-        # -------------------------------------------------------------
-
-        title = ""
-
-        if soup and soup.title:
-
-            title = soup.title.get_text(
-                " ",
-                strip=True,
-            ).lower()
-
-        generic_title_patterns = [
-            "log in",
-            "login",
-            "sign in",
-            "signin",
-            "create account",
-            "register",
-            "404",
-            "not found",
-            "page not found",
-            "search results",
-            "search result",
-            "browse",
-            "home page",
-            "welcome",
-            "something went wrong",
-        ]
-
-        for pattern in generic_title_patterns:
-
-            if pattern in title:
-                return True
-
-        return False
-
-    # =================================================================
-    # YOUTUBE OFFICIAL CHANNEL VERIFICATION
-    # =================================================================
-
-    @staticmethod
-    def _verify_youtube_official_channel(
-        url: str,
-        soup: BeautifulSoup,
-        platform_cfg: Dict,
-    ) -> bool:
-
-        handles = (
-            platform_cfg.get(
-                "youtube_handles",
-                [],
-            )
-        )
-
-        if not handles:
-            return True
-
-        if not url:
-            return False
-
-        url_lower = (
-            unquote(
-                url
-            )
-            .lower()
-        )
-
-        # -------------------------------------------------------------
-        # 1. Exact handle in final URL
-        # -------------------------------------------------------------
-
-        for handle in handles:
-
-            expected = (
-                "/@"
-                + handle.lower()
+            match = re.search(
+                pattern,
+                text or "",
+                re.I
             )
 
-            if expected in url_lower:
-                return True
+            if match:
 
-        # -------------------------------------------------------------
-        # 2. Inspect canonical URL
-        # -------------------------------------------------------------
-
-        canonical = (
-            AnimeScraper._extract_canonical_url(
-                soup,
-                url,
-            )
-            if soup
-            else None
-        )
-
-        if canonical:
-
-            canonical_lower = (
-                canonical.lower()
-            )
-
-            for handle in handles:
+                value = re.sub(
+                    r"\s+",
+                    " ",
+                    match.group(1)
+                ).strip(
+                    " :-|•,"
+                )
 
                 if (
-                    "/@"
-                    + handle.lower()
-                ) in canonical_lower:
-
-                    return True
-
-        # -------------------------------------------------------------
-        # 3. Inspect metadata
-        # -------------------------------------------------------------
-
-        metadata_parts: List[str] = []
-
-        if soup:
-
-            for meta in soup.find_all(
-                "meta"
-            ):
-
-                for attr in (
-                    "content",
-                    "name",
-                    "property",
-                    "itemprop",
+                    value
+                    and len(value) <= 120
                 ):
+                    return value
 
-                    value = meta.get(
-                        attr
-                    )
+        return None
 
-                    if value:
-                        metadata_parts.append(
-                            str(value)
-                        )
-
-            for link in soup.find_all(
-                "link"
-            ):
-
-                for attr in (
-                    "href",
-                    "itemprop",
-                ):
-
-                    value = link.get(
-                        attr
-                    )
-
-                    if value:
-                        metadata_parts.append(
-                            str(value)
-                        )
-
-        metadata = " ".join(
-            metadata_parts
-        ).lower()
-
-        for handle in handles:
-
-            h = handle.lower()
-
-            if (
-                f"youtube.com/@{h}"
-                in metadata
-                or f"@{h}"
-                in metadata
-            ):
-                return True
-
-        # -------------------------------------------------------------
-        # 4. JSON-LD verification
-        # -------------------------------------------------------------
-
-        if soup:
-
-            for obj in (
-                AnimeScraper._extract_json_ld(
-                    soup
-                )
-            ):
-
-                try:
-
-                    raw = json.dumps(
-                        obj,
-                        ensure_ascii=False,
-                    ).lower()
-
-                except (
-                    TypeError,
-                    ValueError,
-                ):
-                    continue
-
-                for handle in handles:
-
-                    h = handle.lower()
-
-                    if (
-                        f"youtube.com/@{h}"
-                        in raw
-                        or f"@{h}"
-                        in raw
-                    ):
-                        return True
-
-        # -------------------------------------------------------------
-        # Do NOT accept an arbitrary YouTube page merely because the
-        # word "YouTube" appears in it.
-        # -------------------------------------------------------------
-
-        return False
 
     # =================================================================
-    # FINAL PLATFORM RESULT VALIDATION
+    # SEASON
     # =================================================================
 
     @staticmethod
-    def _validate_verified_platform_result(
-        result: Optional[Dict],
-    ) -> bool:
+    def _season_numbers(
+        text: str
+    ) -> List[str]:
 
-        if not result:
-            return False
+        values = set()
 
-        if result.get(
-            "verified"
-        ) is not True:
-            return False
-
-        platform = result.get(
-            "platform"
-        )
-
-        url = result.get(
-            "url"
-        )
-
-        title = result.get(
-            "title"
-        )
-
-        if not platform:
-            return False
-
-        if not url:
-            return False
-
-        if not title:
-            return False
-
-        return True
-
-    # =================================================================
-    # FINAL RESULT SANITIZATION
-    # =================================================================
-
-    @staticmethod
-    def _sanitize_final_result(
-        result: Optional[Dict],
-    ) -> Optional[Dict]:
-
-        if not result:
-            return None
-
-        clean_result = dict(
-            result
-        )
-
-        # -------------------------------------------------------------
-        # Normalize languages
-        # -------------------------------------------------------------
-
-        languages = clean_result.get(
-            "languages"
-        )
-
-        if languages:
-
-            language_list = [
-                language.strip()
-                for language in
-                str(languages).split("•")
-                if language.strip()
-                in SUPPORTED_LANGUAGES
-            ]
-
-            clean_result[
-                "languages"
-            ] = (
-                " • ".join(
-                    language_list
-                )
-                if language_list
-                else None
-            )
-
-        # -------------------------------------------------------------
-        # Hindi status must always be based on verified language data.
-        # -------------------------------------------------------------
-
-        language_text = (
-            clean_result.get(
-                "languages"
-            )
-            or ""
-        )
-
-        clean_result[
-            "hindi_dub"
-        ] = (
-            "Available"
-            if "Hindi"
-            in language_text
-            else "Not Verified"
-        )
-
-        # -------------------------------------------------------------
-        # Never claim a platform when none was verified.
-        # -------------------------------------------------------------
-
-        if not clean_result.get(
-            "platform"
+        for value in re.findall(
+            r"\bSeason\s*([0-9]{1,3})\b",
+            text or "",
+            re.I
         ):
+
+            values.add(
+                int(value)
+            )
+
+        for value in re.findall(
+            r"\bS\s*([0-9]{1,3})\b",
+            text or "",
+            re.I
+        ):
+
+            values.add(
+                int(value)
+            )
+
+        return [
+            str(value)
+            for value in sorted(
+                values
+            )
+        ]
+
+    @staticmethod
+    def _extract_season(
+        text: str
+    ) -> Optional[str]:
+
+        seasons = (
+            AnimeScraper._season_numbers(
+                text
+            )
+        )
+
+        if not seasons:
             return None
 
-        return clean_result
-
-    # =================================================================
-    # SAFE PUBLIC SEARCH WRAPPER
-    # =================================================================
-
-    def safe_search_anime(
-        self,
-        anime_name: str,
-    ) -> Optional[Dict]:
-
-        try:
-
-            result = self.search_anime(
-                anime_name
+        if len(seasons) > 5:
+            return (
+                f"{len(seasons)} Seasons"
             )
+
+        return (
+            "Season "
+            + ", ".join(
+                seasons
+            )
+        )
+
+
+    # =================================================================
+    # EPISODE
+    # =================================================================
+
+    @staticmethod
+    def _extract_episode(
+        text: str
+    ) -> Optional[str]:
+
+        patterns = [
+            r"\bEP\s*([0-9]+(?:-[0-9]+)?)\b",
+            r"\bEpisode\s*([0-9]+(?:-[0-9]+)?)\b",
+            r"\bEp\.\s*([0-9]+(?:-[0-9]+)?)\b",
+        ]
+
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                text or "",
+                re.I
+            )
+
+            if match:
+                return match.group(1)
+
+        return None
+
+    # =================================================================
+    # LANGUAGES
+    # =================================================================
+
+    @staticmethod
+    def _extract_languages(
+        text: str
+    ) -> List[str]:
+
+        found = []
+
+        for language in LANGUAGES:
+
+            if re.search(
+                rf"\b{re.escape(language)}\b",
+                text or "",
+                re.I
+            ):
+
+                found.append(
+                    language
+                )
+
+        return list(
+            dict.fromkeys(
+                found
+            )
+        )
+
+    @staticmethod
+    def _ordered_languages(
+        languages: List[str]
+    ) -> List[str]:
+
+        order = [
+            "Hindi",
+            "English",
+            "Tamil",
+            "Telugu",
+            "Japanese",
+        ]
+
+        return [
+            language
+            for language in order
+            if language in languages
+        ]
+
+    @staticmethod
+    def _languages_string(
+                 languages: List[str]
+    ) -> Optional[str]:
+
+        ordered = (
+            AnimeScraper._ordered_languages(
+                languages
+            )
+        )
+
+        return (
+            " â€¢ ".join(
+                ordered
+            )
+            if ordered
+            else None
+    )
+
+    # =================================================================
+    # SCHEDULE
+    # =================================================================
+
+    @staticmethod
+    def _extract_schedule(
+        text: str
+    ) -> Optional[str]:
+
+        days = [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+            "Daily",
+        ]
+
+        for day in days:
+
+            match = re.search(
+                rf"\b{day}\b.*?"
+                rf"([0-9]{{1,2}}:"
+                rf"[0-9]{{2}}\s*[AP]M)",
+                text or "",
+                re.I
+            )
+
+            if match:
+
+                return (
+                    f"{day} "
+                    f"{match.group(1)}"
+                )
+
+        return None
+
+    # =================================================================
+    # DATE
+    # =================================================================
+
+    @staticmethod
+    def _extract_date(
+        text: str
+    ) -> Optional[str]:
+
+        patterns = [
+            (
+                r"\b\d{1,2}\s+"
+                r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|"
+                r"Sep|Oct|Nov|Dec)"
+                r"\s+\d{4}\b"
+            ),
+            (
+                r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|"
+                r"Sep|Oct|Nov|Dec)"
+                r"\s+\d{1,2},\s+\d{4}\b"
+            ),
+            r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+        ]
+
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                text or "",
+                re.I
+            )
+
+            if match:
+                return match.group(0)
+
+        return None
+
+    # =================================================================
+    # PLATFORM SUMMARY
+    # =================================================================
+
+    @staticmethod
+    def _dedupe_platform_entries(
+        entries: List[Dict]
+    ) -> List[Dict]:
+
+        output = []
+        seen = set()
+
+        for entry in entries:
+
+            key = (
+                entry.get(
+                    "platform"
+                ),
+                entry.get(
+                    "channel"
+                ),
+                tuple(
+                    entry.get(
+                        "seasons",
+                        []
+                    )
+                ),
+                tuple(
+                    entry.get(
+                        "languages",
+                        []
+                    )
+                ),
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            output.append(
+                entry
+            )
+
+        return output
+
+    @staticmethod
+    def _platform_summary(
+        entries: List[Dict]
+    ) -> Optional[str]:
+
+        if not entries:
+            return None
+
+        grouped = {}
+
+        for entry in entries:
+
+            platform = entry.get(
+                "platform"
+            )
+
+            if not platform:
+                continue
+
+            label = platform
+
+            if entry.get(
+                "channel"
+            ):
+                label = (
+                    f"{platform} "
+                    f"({entry['channel']})"
+                )
+
+            if label not in grouped:
+
+                grouped[label] = {
+                    "seasons": set(),
+                    "languages": set(),
+                }
+
+            for season in entry.get(
+                "seasons",
+                []
+            ):
+                grouped[label]["seasons"].add(
+                    str(season)
+                )
+
+            for language in entry.get(
+                "languages",
+                []
+            ):
+                grouped[label]["languages"].add(
+                    str(language)
+                )
+
+        lines = []
+
+        def sort_key(item):
+
+            label, data = item
 
             return (
-                self._sanitize_final_result(
-                    result
+                0
+                if "Hindi"
+                in data["languages"]
+                else 1,
+                label.lower(),
+            )
+
+        for label, data in sorted(
+            grouped.items(),
+            key=sort_key
+        ):
+
+            seasons = sorted(
+                {
+                    int(value)
+                    for value
+                    in data["seasons"]
+                    if value.isdigit()
+                }
+            )
+
+            if len(seasons) > 5:
+
+                season_text = (
+                    f"{len(seasons)} Seasons"
+                )
+
+            elif seasons:
+
+                season_text = (
+                    "Season "
+                    + ", ".join(
+                        str(value)
+                        for value in seasons
+                    )
+                )
+
+            else:
+
+                season_text = (
+                    "All Seasons"
+                )
+
+            languages = (
+                AnimeScraper._ordered_languages(
+                    list(
+                        data["languages"]
+                    )
                 )
             )
 
-        except Exception as exc:
-
-            logger.exception(
-                "Anime search failed: %s",
-                exc,
+            language_text = (
+                " â€¢ ".join(
+                    languages
+                )
+                if languages
+                else "Verified"
             )
 
+            lines.append(
+                f"â€¢ {label} â€” "
+                f"{season_text} â€” "
+                f"{language_text}"
+            )
+
+        return (
+            "\n".join(lines)
+            if lines
+            else None
+            )
+
+    # =================================================================
+    # RESULT NORMALIZATION FOR BOT/UI
+    # =================================================================
+
+    @staticmethod
+    def _status_label(result: Dict) -> str:
+        if result.get("airing") is True:
+            return "ðŸ”´ Ongoing"
+        status = str(result.get("status") or "").lower()
+        if "finished" in status or "complete" in status:
+            return "âœ… Completed"
+        return "â„¹ï¸ " + (result.get("status") or "Unknown")
+
+    @staticmethod
+    def _episode_display(result: Dict) -> Optional[str]:
+        total = result.get("total_episodes")
+        aired = result.get("aired_episodes")
+
+        if result.get("airing") is True:
+            if aired is not None and total is not None:
+                return f"{aired} / {total}"
+            if aired is not None:
+                return f"{aired} released"
+            if total is not None:
+                return f"0 / {total}"
             return None
+
+        if total is not None:
+            return f"{total} / {total}"
+
+        if aired is not None:
+            return str(aired)
+
+        return result.get("episodes")
+
+    @staticmethod
+    def format_bot_result(result: Dict) -> str:
+        """
+        Ready-to-send Telegram text. The scraper still returns the full
+        dict, while this method keeps presentation separate from scraping.
+        """
+
+        if not result:
+            return ""
+
+        lines = [
+            f"ðŸŽ¬ Anime: {result.get('name') or 'Unknown'}",
+            "",
+            "ðŸ‡®ðŸ‡³ Hindi Dub: "
+            + str(result.get("hindi_dub") or "Not Verified"),
+            "ðŸ“º Platform: "
+            + str(result.get("platform") or "Not Verified"),
+            "ðŸ“€ Season: "
+            + str(result.get("season") or "Not Mentioned"),
+            "ðŸŽ¬ Episodes: "
+            + str(
+                AnimeScraper._episode_display(result)
+                or "Not Available"
+            ),
+            "ðŸŒ Languages: "
+            + str(result.get("languages") or "Not Mentioned"),
+            "",
+            "ðŸ“Š Status: "
+            + AnimeScraper._status_label(result),
+        ]
+
+        if result.get("last_episode"):
+            lines.append(
+                "ðŸ“… Last Episode: "
+                f"Episode {result['last_episode']}"
+            )
+
+        if result.get("last_episode_date"):
+            date_value = AnimeScraper._format_iso_date(
+                result["last_episode_date"]
+            )
+            if date_value:
+                lines.append(
+                    "ðŸ—“ Last Release: " + date_value
+                )
+
+        if result.get("airing") is True:
+            if result.get("next_episode"):
+                lines.append(
+                    "â­ Next Episode: "
+                    f"Episode {result['next_episode']}"
+                )
+
+            if result.get("next_episode_date"):
+                date_value = AnimeScraper._format_iso_date(
+                    result["next_episode_date"]
+                )
+                if date_value:
+                    lines.append(
+                        "ðŸ“… Expected Release: " + date_value
+                    )
+
+            if result.get("broadcast"):
+                lines.append(
+                    "â° Schedule: "
+                    + str(result["broadcast"])
+                )
+
+        if result.get("studio"):
+            lines.append(
+                "ðŸ¢ Studio: " + str(result["studio"])
+            )
+
+        if result.get("dub_by"):
+            lines.append(
+                "ðŸŽ™ Dub By: " + str(result["dub_by"])
+            )
+
+        lines.extend([
+            "",
+            "ðŸ”Ž Source: DC",
+        ])
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_iso_date(value: str) -> Optional[str]:
+        try:
+            dt = datetime.fromisoformat(
+                str(value).replace("Z", "+00:00")
+            )
+            return dt.strftime("%d %b %Y, %I:%M %p UTC")
+        except Exception:
+            return str(value) if value else None
 
 
 # =====================================================================
-# SINGLETON
+# SINGLE INSTANCE
 # =====================================================================
 
 anime_scraper = AnimeScraper()
 
 
 # =====================================================================
-# PUBLIC API
+# PUBLIC FUNCTION
 # =====================================================================
 
 def get_anime_info(
     anime_name: str,
 ) -> Optional[Dict]:
+    """Public function used by commands.py."""
 
-    """
-    Public API for verified anime metadata.
+    return anime_scraper.search_anime(
+        anime_name
+    )
 
-    Only information verified from official sources is returned.
-    Jikan/MAL is used only for neutral metadata such as poster,
-    studio, canonical title, and MAL URL.
-    """
 
-    anime_name = (
-        anime_name or ""
-    ).strip()
+def format_anime_info(
+    anime_name: str,
+) -> Optional[str]:
+    """Return ready-to-send bot text for an anime search."""
 
-    if not anime_name:
+    result = get_anime_info(anime_name)
+
+    if not result:
         return None
 
-    return anime_scraper.safe_search_anime(
-        anime_name
-)
+    return anime_scraper.format_bot_result(result)
+    
+                 
