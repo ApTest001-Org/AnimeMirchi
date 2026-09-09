@@ -148,6 +148,13 @@ LANGUAGES = [
     "Tamil",
     "Telugu",
     "Japanese",
+    "Korean",
+    "Chinese",
+    "Malayalam",
+    "Kannada",
+    "Marathi",
+    "Bengali",
+    "Bangla",
 ]
 
 
@@ -298,6 +305,14 @@ class AnimeScraper:
                 for entry in result["platform_entries"]
                 if entry.get("platform")
             )) or None
+            verified_languages = []
+            for entry in result["platform_entries"]:
+                for language in entry.get("languages", []):
+                    if language not in verified_languages:
+                        verified_languages.append(language)
+            result["languages"] = self._languages_string(
+                self._ordered_languages(verified_languages)
+            ) or None
             result["hindi_dub"] = "Available" if any(
                 "Hindi" in entry.get("languages", [])
                 for entry in result["platform_entries"]
@@ -329,6 +344,15 @@ class AnimeScraper:
                     for entry in fallback_entries
                     if entry.get("platform")
                 )) or None
+
+                fallback_languages = []
+                for entry in fallback_entries:
+                    for language in entry.get("languages", []):
+                        if language not in fallback_languages:
+                            fallback_languages.append(language)
+                result["languages"] = self._languages_string(
+                    self._ordered_languages(fallback_languages)
+                ) or result.get("languages")
 
                 hindi_found = any(
                     "Hindi" in entry.get("languages", [])
@@ -428,7 +452,6 @@ class AnimeScraper:
             soup = BeautifulSoup(
                 response.text,
                 "html.parser"
-              
             )
 
             return self._parse_matching_page(
@@ -866,7 +889,7 @@ class AnimeScraper:
                 ]
             ):
                 tag.decompose()
-  
+
             title = self._pick_title(
                 soup,
                 fallback_title
@@ -1303,7 +1326,7 @@ class AnimeScraper:
         url: str,
         fallback_title: str,
         query: str,
-      ) -> Optional[Dict]:
+    ) -> Optional[Dict]:
 
         try:
             response = self.session.get(
@@ -1583,9 +1606,9 @@ class AnimeScraper:
                     if not self._query_present(anime_name, combined):
                         continue
 
-                    languages = self._extract_languages(combined)
-                    # This checker exists specifically to prove a Hindi
-                    # dub/audio claim. Other languages alone are not enough.
+                    languages = self._extract_verified_audio_languages(combined)
+                    # A generic word such as "Hindi" somewhere on a page is
+                    # NOT proof of Hindi audio. Accept only audio/dub context.
                     if "Hindi" not in languages:
                         continue
 
@@ -1666,7 +1689,7 @@ class AnimeScraper:
         query = (
             f"site:{domain} "
             f'"{anime_name}" '
-            f'"Hindi" anime'
+            f'(Hindi OR dubbed OR audio OR language) anime'
         )
 
         url = (
@@ -1739,8 +1762,8 @@ class AnimeScraper:
                             else ""
                         ),
                     }
-          )
-      
+                )
+
             return results
 
         except Exception as exc:
@@ -1755,7 +1778,6 @@ class AnimeScraper:
     # =================================================================
     # FETCH PAGE
     # =================================================================
-
     def _fetch_page(
         self,
         url: str,
@@ -1823,21 +1845,42 @@ class AnimeScraper:
         A delayed/cancelled episode can therefore differ from it.
         """
 
-        try:
-            response = self.session.get(
-                JIKAN_URL,
-                params={
-                    "q": anime_name,
-                    "limit": 10,
-                    "sfw": "true",
-                },
-                timeout=12,
-            )
-            response.raise_for_status()
+        # Jikan can temporarily return 429/5xx or fail from a transient
+        # network error. Never treat that as "anime not found" on the
+        # first attempt. Try the query a few times before giving up.
+        data = []
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = self.session.get(
+                    JIKAN_URL,
+                    params={
+                        "q": anime_name,
+                        "limit": 15,
+                        "sfw": "true",
+                    },
+                    timeout=15,
+                )
+                if response.status_code == 200:
+                    data = response.json().get("data", [])
+                    if data:
+                        break
+                else:
+                    last_error = f"HTTP {response.status_code}"
+            except Exception as exc:
+                last_error = str(exc)
 
-            data = response.json().get("data", [])
-            if not data:
-                return None
+            if attempt < 2:
+                import time
+                time.sleep(0.8 * (attempt + 1))
+
+        if not data:
+            logger.warning(
+                "Jikan returned no data for %s after retries: %s",
+                anime_name,
+                last_error,
+            )
+            return None
 
             query = self._normalize(anime_name)
             selected = None
@@ -2032,14 +2075,6 @@ class AnimeScraper:
                 ),
             }
 
-        except Exception as exc:
-            logger.warning(
-                "Jikan lookup failed for %s: %s",
-                anime_name,
-                exc
-            )
-            return None
-
     @staticmethod
     def _next_broadcast_datetime(
         broadcast: Dict,
@@ -2186,8 +2221,8 @@ class AnimeScraper:
 
             value = og_title.get(
                 "content"
-            )
-
+                )
+       
             if value:
                 return value
 
@@ -2562,6 +2597,33 @@ class AnimeScraper:
     # =================================================================
 
     @staticmethod
+    def _extract_verified_audio_languages(
+        text: str
+    ) -> List[str]:
+        """Extract languages only when they appear near audio/dub labels."""
+        value = text or ""
+        found = []
+
+        # Keep a reasonably tight context window around explicit audio/dub
+        # wording so unrelated page text does not create fake languages.
+        contexts = []
+        for match in re.finditer(
+            r'(?:audio|audios|language|languages|dub|dubbed|dubbing|"audio")',
+            value,
+            re.I,
+        ):
+            start = max(0, match.start() - 180)
+            end = min(len(value), match.end() + 260)
+            contexts.append(value[start:end])
+
+        context_text = " ".join(contexts)
+        for language in LANGUAGES:
+            if re.search(rf"\b{re.escape(language)}\b", context_text, re.I):
+                found.append(language)
+
+        return AnimeScraper._ordered_languages(found)
+
+    @staticmethod
     def _extract_languages(
         text: str
     ) -> List[str]:
@@ -2597,8 +2659,15 @@ class AnimeScraper:
             "Tamil",
             "Telugu",
             "Japanese",
-        ]
-
+            "Korean",
+            "Chinese",
+            "Malayalam",
+            "Kannada",
+            "Marathi",
+            "Bengali",
+            "Bangla",
+            ]
+            
         return [
             language
             for language in order
@@ -2607,7 +2676,7 @@ class AnimeScraper:
 
     @staticmethod
     def _languages_string(
-                 languages: List[str]
+        languages: List[str]
     ) -> Optional[str]:
 
         ordered = (
@@ -2617,7 +2686,7 @@ class AnimeScraper:
         )
 
         return (
-            " â€¢ ".join(
+            " • ".join(
                 ordered
             )
             if ordered
@@ -2857,7 +2926,7 @@ class AnimeScraper:
             )
 
             language_text = (
-                " â€¢ ".join(
+                " • ".join(
                     languages
                 )
                 if languages
@@ -2865,8 +2934,8 @@ class AnimeScraper:
             )
 
             lines.append(
-                f"â€¢ {label} â€” "
-                f"{season_text} â€” "
+                f"• {label} — "
+                f"{season_text} — "
                 f"{language_text}"
             )
 
@@ -2883,11 +2952,11 @@ class AnimeScraper:
     @staticmethod
     def _status_label(result: Dict) -> str:
         if result.get("airing") is True:
-            return "ðŸ”´ Ongoing"
+            return "🔴 Ongoing"
         status = str(result.get("status") or "").lower()
         if "finished" in status or "complete" in status:
-            return "âœ… Completed"
-        return "â„¹ï¸ " + (result.get("status") or "Unknown")
+            return "✅ Completed"
+        return "ℹ️ " + (result.get("status") or "Unknown")
 
     @staticmethod
     def _episode_display(result: Dict) -> Optional[str]:
@@ -2922,29 +2991,29 @@ class AnimeScraper:
             return ""
 
         lines = [
-            f"ðŸŽ¬ Anime: {result.get('name') or 'Unknown'}",
+            f"🎬 Anime: {result.get('name') or 'Unknown'}",
             "",
-            "ðŸ‡®ðŸ‡³ Hindi Dub: "
+            "🇮🇳 Hindi Dub: "
             + str(result.get("hindi_dub") or "Not Verified"),
-            "ðŸ“º Platform: "
+            "📺 Platform: "
             + str(result.get("platform") or "Not Verified"),
-            "ðŸ“€ Season: "
+            "📀 Season: "
             + str(result.get("season") or "Not Mentioned"),
-            "ðŸŽ¬ Episodes: "
+            "🎬 Episodes: "
             + str(
                 AnimeScraper._episode_display(result)
                 or "Not Available"
             ),
-            "ðŸŒ Languages: "
+            "🌐 Languages: "
             + str(result.get("languages") or "Not Mentioned"),
             "",
-            "ðŸ“Š Status: "
+            "📊 Status: "
             + AnimeScraper._status_label(result),
         ]
 
         if result.get("last_episode"):
             lines.append(
-                "ðŸ“… Last Episode: "
+                "📅 Last Episode: "
                 f"Episode {result['last_episode']}"
             )
 
@@ -2954,13 +3023,13 @@ class AnimeScraper:
             )
             if date_value:
                 lines.append(
-                    "ðŸ—“ Last Release: " + date_value
+                    "🗓 Last Release: " + date_value
                 )
 
         if result.get("airing") is True:
             if result.get("next_episode"):
                 lines.append(
-                    "â­ Next Episode: "
+                    "⏭ Next Episode: "
                     f"Episode {result['next_episode']}"
                 )
 
@@ -2970,28 +3039,28 @@ class AnimeScraper:
                 )
                 if date_value:
                     lines.append(
-                        "ðŸ“… Expected Release: " + date_value
+                        "📅 Expected Release: " + date_value
                     )
 
             if result.get("broadcast"):
                 lines.append(
-                    "â° Schedule: "
+                    "⏰ Schedule: "
                     + str(result["broadcast"])
                 )
 
         if result.get("studio"):
             lines.append(
-                "ðŸ¢ Studio: " + str(result["studio"])
+                "🏢 Studio: " + str(result["studio"])
             )
 
         if result.get("dub_by"):
             lines.append(
-                "ðŸŽ™ Dub By: " + str(result["dub_by"])
+                "🎙 Dub By: " + str(result["dub_by"])
             )
 
         lines.extend([
             "",
-            "ðŸ”Ž Source: DC",
+            "🔎 Source: DC",
         ])
 
         return "\n".join(lines)
@@ -3040,4 +3109,5 @@ def format_anime_info(
 
     return anime_scraper.format_bot_result(result)
     
-                 
+
+            
