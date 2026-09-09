@@ -53,6 +53,7 @@ SCHEDULE_URL = f"{SITE_URL}schedule.php"
 ANIME_MIRCHI_URL = "https://animemirchi.com/"
 JIKAN_URL = "https://api.jikan.moe/v4/anime"
 JIKAN_API_BASE = "https://api.jikan.moe/v4"
+ANILIST_URL = "https://graphql.anilist.co"
 
 
 # =====================================================================
@@ -213,6 +214,9 @@ class AnimeScraper:
         def fetch_mal():
             return AnimeScraper()._get_mal_info(anime_name)
 
+        def fetch_anilist():
+            return AnimeScraper()._get_anilist_info(anime_name)
+
         def fetch_animedubhindi():
             return AnimeScraper()._find_animedubhindi(anime_name, query)
 
@@ -220,12 +224,17 @@ class AnimeScraper:
             return AnimeScraper()._search_anime_mirchi(anime_name, query)
 
         mal = None
+        anilist = None
         fallback_dh = None
         mirchi = None
 
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="anime-base") as executor:
+        # Use several independent metadata sources at the same time.  A
+        # temporary 429/403 from one service must not make a valid anime
+        # look "not found".
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="anime-base") as executor:
             futures = {
                 executor.submit(fetch_mal): "mal",
+                executor.submit(fetch_anilist): "anilist",
                 executor.submit(fetch_animedubhindi): "animedubhindi",
                 executor.submit(fetch_mirchi): "animemirchi",
             }
@@ -235,6 +244,8 @@ class AnimeScraper:
                     value = future.result()
                     if name == "mal":
                         mal = value
+                    elif name == "anilist":
+                        anilist = value
                     elif name == "animedubhindi":
                         fallback_dh = value
                     else:
@@ -244,13 +255,14 @@ class AnimeScraper:
 
         # The anime itself is considered found if MAL/Jikan or either
         # fallback metadata source identified a matching title.
-        if not mal and not fallback_dh and not mirchi:
-            logger.info("Anime not found: %s", anime_name)
+        if not mal and not anilist and not fallback_dh and not mirchi:
+            logger.info("Anime not found in metadata sources: %s", anime_name)
             return None
 
         result = {
             "name": (
                 mal.get("name") if mal else
+                anilist.get("name") if anilist else
                 fallback_dh.get("name") if fallback_dh else
                 mirchi.get("name") if mirchi else anime_name
             ),
@@ -258,23 +270,23 @@ class AnimeScraper:
             "platform": None,
             "platform_entries": [],
             "dub_by": None,
-            "studio": mal.get("studio") if mal else None,
+            "studio": (mal.get("studio") if mal else (anilist.get("studio") if anilist else None)),
             "hindi_details": None,
             "season": fallback_dh.get("season") if fallback_dh else None,
-            "episodes": fallback_dh.get("episodes") if fallback_dh else None,
+            "episodes": (fallback_dh.get("episodes") if fallback_dh else (anilist.get("episodes") if anilist else None)),
             "languages": fallback_dh.get("languages") if fallback_dh else None,
             "schedule": fallback_dh.get("schedule") if fallback_dh else None,
             "release_date": fallback_dh.get("release_date") if fallback_dh else None,
-            "status": mal.get("status") if mal else None,
-            "airing": mal.get("airing") if mal else None,
-            "total_episodes": mal.get("total_episodes") if mal else None,
-            "aired_episodes": mal.get("aired_episodes") if mal else None,
-            "last_episode": mal.get("last_episode") if mal else None,
-            "last_episode_date": mal.get("last_episode_date") if mal else None,
-            "next_episode": mal.get("next_episode") if mal else None,
-            "next_episode_date": mal.get("next_episode_date") if mal else None,
-            "broadcast": mal.get("broadcast") if mal else None,
-            "poster_url": mal.get("poster_url") if mal else None,
+            "status": (mal.get("status") if mal else (anilist.get("status") if anilist else None)),
+            "airing": (mal.get("airing") if mal else (anilist.get("airing") if anilist else None)),
+            "total_episodes": (mal.get("total_episodes") if mal else (anilist.get("total_episodes") if anilist else None)),
+            "aired_episodes": (mal.get("aired_episodes") if mal else (anilist.get("aired_episodes") if anilist else None)),
+            "last_episode": (mal.get("last_episode") if mal else (anilist.get("last_episode") if anilist else None)),
+            "last_episode_date": (mal.get("last_episode_date") if mal else (anilist.get("last_episode_date") if anilist else None)),
+            "next_episode": (mal.get("next_episode") if mal else (anilist.get("next_episode") if anilist else None)),
+            "next_episode_date": (mal.get("next_episode_date") if mal else (anilist.get("next_episode_date") if anilist else None)),
+            "broadcast": (mal.get("broadcast") if mal else (anilist.get("broadcast") if anilist else None)),
+            "poster_url": (mal.get("poster_url") if mal else (anilist.get("poster_url") if anilist else None)),
             "mal_url": mal.get("mal_url") if mal else None,
             "source": "DC",
             "source_link": None,
@@ -290,6 +302,18 @@ class AnimeScraper:
             ):
                 if not result.get(key) and fallback_dh.get(key):
                     result[key] = fallback_dh[key]
+
+        # AniList is a metadata-only emergency fallback when Jikan/MAL is
+        # rate-limited.  It never replaces official platform verification.
+        if anilist:
+            for key in (
+                "name", "episodes", "total_episodes", "aired_episodes",
+                "last_episode", "last_episode_date", "next_episode",
+                "next_episode_date", "broadcast", "poster_url", "studio",
+                "status", "airing",
+            ):
+                if not result.get(key) and anilist.get(key) is not None:
+                    result[key] = anilist[key]
 
         if mirchi:
             result["fallback_mirchi"] = mirchi
@@ -452,8 +476,8 @@ class AnimeScraper:
             soup = BeautifulSoup(
                 response.text,
                 "html.parser"
-            )
-
+        )
+                
             return self._parse_matching_page(
                 soup,
                 query,
@@ -932,7 +956,7 @@ class AnimeScraper:
                 result["poster_url"] = (
                     self._extract_og_image(
                         soup
-                    )
+                                )
                 )
 
             return result
@@ -1410,8 +1434,8 @@ class AnimeScraper:
                         "verified": True,
                         "source": "Anime Mirchi",
                     }
-                )
-
+            )
+        
             return {
                 "name": self._clean_mirchi_title(title),
                 "platform": " • ".join(platforms) if platforms else None,
@@ -1820,6 +1844,221 @@ class AnimeScraper:
             return None
 
     # =================================================================
+    # ANILIST METADATA FALLBACK
+    # =================================================================
+
+    def _get_anilist_info(
+        self,
+        anime_name: str,
+    ) -> Optional[Dict]:
+        """
+        Independent metadata fallback for times when Jikan/MAL is
+        rate-limited.  AniList is used only for anime identity and metadata;
+        it is never used as proof of Hindi dubbing or platform availability.
+        """
+        query = (anime_name or "").strip()
+        if not query:
+            return None
+
+        graphql = """
+        query ($search: String) {
+          Page(page: 1, perPage: 8) {
+            media(search: $search, type: ANIME) {
+              id
+              type
+              title {
+                romaji
+                english
+                native
+                userPreferred
+              }
+              episodes
+              status
+              isAdult
+              isLicensed
+              coverImage {
+                large
+                extraLarge
+              }
+              studios(isMain: true) {
+                nodes {
+                  name
+                }
+              }
+              nextAiringEpisode {
+                airingAt
+                episode
+              }
+              airingSchedule(notYetAired: false, perPage: 1) {
+                nodes {
+                  airingAt
+                  episode
+                }
+              }
+              startDate { year month day }
+              endDate { year month day }
+            }
+          }
+        }
+        """
+
+        try:
+            response = self.session.post(
+                ANILIST_URL,
+                json={"query": graphql, "variables": {"search": query}},
+                timeout=15,
+            )
+            if response.status_code != 200:
+                logger.debug(
+                    "AniList returned HTTP %s for %s",
+                    response.status_code,
+                    anime_name,
+    )
+                                return None
+
+            payload = response.json()
+            media = (
+                payload.get("data", {})
+                .get("Page", {})
+                .get("media", [])
+            )
+
+            if not media:
+                return None
+
+            normalized_query = self._normalize(query)
+
+            def score(item):
+                titles = []
+                title_obj = item.get("title") or {}
+                for key in ("userPreferred", "romaji", "english", "native"):
+                    value = title_obj.get(key)
+                    if value:
+                        titles.append(value)
+
+                best = 0
+                for title in titles:
+                    normalized_title = self._normalize(title)
+                    if normalized_title == normalized_query:
+                        best = max(best, 100)
+                    elif normalized_query in normalized_title:
+                        best = max(best, 80)
+                    elif set(normalized_query.split()).issubset(
+                        set(normalized_title.split())
+                    ):
+                        best = max(best, 70)
+
+                # Strongly prefer non-adult results for normal anime queries.
+                if item.get("isAdult"):
+                    best -= 100
+
+                return best
+
+            selected = max(media, key=score)
+            if score(selected) < 70:
+                return None
+
+            title_obj = selected.get("title") or {}
+            name = (
+                title_obj.get("userPreferred")
+                or title_obj.get("english")
+                or title_obj.get("romaji")
+                or query
+            )
+
+            studios = []
+            for node in (selected.get("studios") or {}).get("nodes", []):
+                if isinstance(node, dict) and node.get("name"):
+                    studios.append(node["name"])
+
+            studio = " • ".join(dict.fromkeys(studios)) if studios else None
+
+            episodes = selected.get("episodes")
+            next_air = selected.get("nextAiringEpisode") or {}
+            next_episode = next_air.get("episode")
+            next_timestamp = next_air.get("airingAt")
+
+            next_date = None
+            if next_timestamp:
+                try:
+                    next_date = datetime.fromtimestamp(
+                        int(next_timestamp),
+                        tz=timezone.utc,
+                    ).isoformat()
+                except Exception:
+                    next_date = None
+
+            airing = bool(next_air)
+            status = selected.get("status")
+            if status == "FINISHED":
+                airing = False
+
+            aired_count = None
+            last_episode = None
+            last_episode_date = None
+
+            # AniList's airingSchedule can provide an already-aired episode
+            # when available.  Keep this best-effort because the endpoint can
+            # change independently of the rest of the metadata.
+            try:
+                nodes = (
+                    (selected.get("airingSchedule") or {}).get("nodes")
+                    or []
+                )
+                if nodes:
+                    latest = max(
+                        nodes,
+                        key=lambda item: int(item.get("airingAt") or 0),
+                    )
+                    last_episode = latest.get("episode")
+                    if latest.get("airingAt"):
+                        last_episode_date = datetime.fromtimestamp(
+                            int(latest["airingAt"]),
+                            tz=timezone.utc,
+                        ).isoformat()
+                    aired_count = last_episode
+            except Exception:
+                pass
+
+            if not airing and episodes is not None:
+                aired_count = episodes
+                last_episode = episodes
+
+            broadcast = None
+
+            return {
+                "name": name,
+                "poster_url": (
+                    (selected.get("coverImage") or {}).get("extraLarge")
+                    or (selected.get("coverImage") or {}).get("large")
+                ),
+                "studio": studio,
+                "mal_url": None,
+                "episodes": str(episodes) if episodes is not None else None,
+                "total_episodes": (
+                    int(episodes) if episodes is not None else None
+                ),
+                "aired_episodes": (
+                    int(aired_count) if aired_count is not None else None
+                ),
+                "last_episode": (
+                    str(last_episode) if last_episode is not None else None
+                ),
+                "last_episode_date": last_episode_date,
+                "next_episode": (
+                    str(next_episode) if next_episode is not None else None
+                ),
+                "next_episode_date": next_date,
+                "status": status,
+                "airing": airing,
+                "broadcast": broadcast,
+            }
+
+        except Exception as exc:
+            logger.debug("AniList lookup failed for %s: %s", anime_name, exc)
+            return None
+
+    # =================================================================
     # JIKAN / MAL
     # =================================================================
 
@@ -1882,31 +2121,31 @@ class AnimeScraper:
             )
             return None
 
-            query = self._normalize(anime_name)
-            selected = None
+        query = self._normalize(anime_name)
+        selected = None
 
-            # Exact title first.
+        # Exact title first.
+        for anime in data:
+            if any(
+                self._normalize(title) == query
+                for title in self._get_titles(anime)
+            ):
+                selected = anime
+                break
+
+        # Then partial/alternative title.
+        if selected is None:
             for anime in data:
                 if any(
-                    self._normalize(title) == query
+                    self._title_matches(title, query)
                     for title in self._get_titles(anime)
                 ):
                     selected = anime
                     break
 
-            # Then partial/alternative title.
-            if selected is None:
-                for anime in data:
-                    if any(
-                        self._title_matches(title, query)
-                        for title in self._get_titles(anime)
-                    ):
-                        selected = anime
-                        break
-
-            if selected is None:
-                # Avoid returning an unrelated MAL result.
-                return None
+        if selected is None:
+            # Avoid returning an unrelated MAL result.
+            return None
 
             mal_id = selected.get("mal_id")
             if not mal_id:
@@ -2154,7 +2393,7 @@ class AnimeScraper:
             "title",
             "title_english",
             "title_japanese",
-        ):
+                   ):
 
             value = anime.get(
                 key
@@ -2633,7 +2872,7 @@ class AnimeScraper:
         for language in LANGUAGES:
 
             if re.search(
-                rf"\b{re.escape(language)}\b",
+                    rf"\b{re.escape(language)}\b",
                 text or "",
                 re.I
             ):
@@ -3110,4 +3349,4 @@ def format_anime_info(
     return anime_scraper.format_bot_result(result)
     
 
-            
+
