@@ -1622,10 +1622,7 @@ async def search_anime(
         f"{BASE_URL}/?s={quote_plus(query)}",
         f"{BASE_URL}/search/{quote_plus(query)}/",
     ]
-
-    for search_url in search_urls:
-
-        try:
+    
 
     for search_url in search_urls:
 
