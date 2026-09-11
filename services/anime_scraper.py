@@ -1727,7 +1727,7 @@ async def search_anime(
                 f"&per_page=20"
             )
 
-            html = await fetch_text(
+            html = await fetch(
                 session,
                 api_url
             )
