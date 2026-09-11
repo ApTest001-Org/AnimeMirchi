@@ -1793,82 +1793,8 @@ def format_anime_result(
                 result.languages
             )
         )
-schedule(
-        self,
-        text: str
-    ) -> str:
 
-        patterns = [
 
-            r"(?:1\s+)?New Episode\s+Every\s+([A-Za-z]+)",
-
-            r"New Episodes?\s+Every\s+([A-Za-z]+)",
-
-            r"Every\s+(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)",
-
-        ]
-
-        for pattern in patterns:
-
-            match = re.search(
-                pattern,
-                text,
-                re.I
-            )
-
-            if match:
-
-                day = match.group(1)
-
-                return (
-                    "Every "
-                    + day.capitalize()
-                )
-
-        return ""
-
-    # ========================================================
-    # NEXT EPISODE
-    # ========================================================
-
-    def extract_next_episode(
-        self,
-        text: str,
-        current_episode: int
-    ) -> int | None:
-
-        patterns = [
-
-            r"Next\s+Episode\s*[:\-]?\s*(?:Episode\s*)?(\d{1,4})",
-
-            r"Episode\s+(\d{1,4})\s+NEw",
-
-        ]
-
-        for pattern in patterns:
-
-            match = re.search(
-                pattern,
-                text,
-                re.I
-            )
-
-            if match:
-
-                try:
-
-                    return int(
-                        match.group(1)
-                    )
-
-                except ValueError:
-                    pass
-
-        # Ongoing + current episode
-        if current_episode:
-            return current_episode + 1
-
-        return None
 
     # ========================================================
     # STUDIO
