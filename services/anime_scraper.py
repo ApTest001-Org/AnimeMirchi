@@ -1627,11 +1627,14 @@ async def search_anime(
 
         try:
 
-        html = await fetch_cached(
-             session,
-             search_url
-        )
-            
+    for search_url in search_urls:
+
+        try:
+
+            html = await fetch_cached(
+                session,
+                search_url
+            )
 
             if not html:
                 continue
