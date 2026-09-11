@@ -1,305 +1,589 @@
 """
-Command handlers for Telegram bot
-Handles /start, /help, and /anime commands with poster image support
+Telegram command handlers for Anime Hindi Info Bot.
+
+Commands:
+    /start
+    /help
+    /anime <anime name>
+
+Compatible with services.anime_scraper.AnimeInfo
 """
+
+import html
+from typing import Any
 
 from telegram import Update
 from telegram.ext import ContextTypes
-from typing import Optional, Dict
-import html
 
-from services.anime_scraper import get_anime_info
+from services.anime_scraper import (
+    AnimeInfo,
+    get_anime_info,
+    format_anime_info,
+)
+
 from utils.logger import logger
 
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle /start command
-    Sends a welcome message to the user
-    
-    Args:
-        update: Telegram update
-        context: Telegram context
-    """
-    logger.info(f"Start command received from user {update.effective_user.id}")
-    
-    welcome_message = (
-        "🎬 <b>Welcome to Anime Hindi Dub Bot!</b>\n\n"
-        "I help you find information about Hindi-dubbed anime from "
-        "multiple reliable sources.\n\n"
-        "🎯 <b>Use me like this:</b>\n"
-        "/anime Naruto\n\n"
-        "ℹ️ <b>Available Commands:</b>\n"
-        "/start - Show this welcome message\n"
-        "/help - Show detailed help\n"
-        "/anime &lt;name&gt; - Search for anime\n\n"
-        "💡 <b>Works in:</b>\n"
-        "✅ Private chats\n"
-        "✅ Group chats (no admin privileges needed)\n\n"
-        "🎬 <b>Features:</b>\n"
-        "✅ Anime poster display\n"
-        "✅ Hindi dub verification\n"
-        "✅ Platform information\n"
-        "✅ Multi-source data\n\n"
-        "Use /help for more information!"
+# ============================================================
+# START COMMAND
+# ============================================================
+
+async def start_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Handle /start command."""
+
+    if not update.message:
+        return
+
+    user = update.effective_user
+    user_id = user.id if user else "unknown"
+
+    logger.info(
+        f"Start command received from user {user_id}"
     )
-    
-    await update.message.reply_html(welcome_message)
 
+    message = (
+        "🎬 Welcome to Anime Hindi Dub Bot!\n\n"
+        "Hindi-dubbed anime ki information check karein "
+        "aur anime ka poster/details paayein.\n\n"
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle /help command
-    Sends detailed help message to the user
-    
-    Args:
-        update: Telegram update
-        context: Telegram context
-    """
-    logger.info(f"Help command received from user {update.effective_user.id}")
-    
-    help_message = (
-        "ℹ️ <b>Help - Available Commands</b>\n\n"
-        
-        "<b>1️⃣ /start</b>\n"
-        "Shows the welcome message and quick overview.\n\n"
-        
-        "<b>2️⃣ /help</b>\n"
-        "Shows this help message.\n\n"
-        
-        "<b>3️⃣ /anime &lt;anime_name&gt;</b>\n"
-        "Search for anime and get Hindi dub information with poster.\n\n"
-        
-        "<b>📝 Examples:</b>\n"
+        "🎯 Use:\n"
         "/anime Naruto\n"
+        "/anime Solo Leveling\n"
+        "/anime Re Zero\n\n"
+
+        "ℹ️ Commands:\n"
+        "/start - Welcome message\n"
+        "/help - Help aur examples\n"
+        "/anime <name> - Anime search\n\n"
+
+        "💬 Works in:\n"
+        "✅ Private chats\n"
+        "✅ Telegram groups\n\n"
+
+        "✨ Information:\n"
+        "✅ Anime poster\n"
+        "✅ Hindi Dub status\n"
+        "✅ Platform\n"
+        "✅ Season\n"
+        "✅ Episodes\n"
+        "✅ Languages\n"
+        "✅ Status\n"
+        "✅ Release information\n"
+        "✅ Studio\n"
+        "✅ Dub By\n\n"
+
+        "🔎 Source: DC"
+    )
+
+    await update.message.reply_text(message)
+
+
+# ============================================================
+# HELP COMMAND
+# ============================================================
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Handle /help command."""
+
+    if not update.message:
+        return
+
+    user = update.effective_user
+    user_id = user.id if user else "unknown"
+
+    logger.info(
+        f"Help command received from user {user_id}"
+    )
+
+    message = (
+        "ℹ️ Anime Hindi Dub Bot - Help\n\n"
+
+        "1️⃣ /start\n"
+        "Bot ka welcome message dikhata hai.\n\n"
+
+        "2️⃣ /help\n"
+        "Ye help message dikhata hai.\n\n"
+
+        "3️⃣ /anime <anime_name>\n"
+        "Anime search karke available information dikhata hai.\n\n"
+
+        "📝 Examples:\n"
+        "/anime Naruto\n"
+        "/anime Naruto Shippuden\n"
+        "/anime Solo Leveling\n"
+        "/anime Re Zero\n"
         "/anime Attack on Titan\n"
         "/anime Spy x Family\n"
         "/anime Naruto Movie\n\n"
-        
-        "<b>📊 What You'll Get:</b>\n"
-        "🎬 <b>Anime Poster</b> - Official poster image\n"
-        "📝 <b>Anime Name</b> - Official title\n"
-        "🇮🇳 <b>Hindi Dub</b> - Available/Not Verified\n"
-        "📺 <b>Platform</b> - Where to watch (Crunchyroll, Netflix, etc.)\n"
-        "🎙️ <b>Dub By</b> - Dubbing studio (if available)\n"
-        "📀 <b>Season</b> - Season information\n"
-        "🎬 <b>Episodes</b> - Episode count/range\n"
-        "🔄 <b>Status</b> - Ongoing/Completed\n"
-        "🌐 <b>Languages</b> - Available audio languages\n"
-        "🗓️ <b>Release Date</b> - Anime release date\n"
-        "🔎 <b>Source</b> - Data sources used\n\n"
-        
-        "<b>✨ Features:</b>\n"
-        "✅ Works in private chats and groups\n"
-        "✅ No admin privileges required\n"
-        "✅ Multi-source verification (AnimeDubHindi, Anime Mirchi, MyAnimeList)\n"
-        "✅ Parallel data fetching for fast results (~6-8 seconds)\n"
-        "✅ Anime poster display with details\n"
-        "✅ Graceful error handling\n\n"
-        
-        "<b>❌ What This Bot Does NOT Do:</b>\n"
-        "🚫 Download or store anime episodes\n"
-        "🚫 Provide illegal streaming links\n"
-        "🚫 Distribute copyrighted content\n\n"
-        
-        "<b>📚 Data Sources:</b>\n"
-        "• AnimeDubHindi - Hindi dub status, seasons, episodes\n"
-        "• Anime Mirchi - Platform and dub information\n"
-        "• MyAnimeList/Jikan - Poster, studio, episode count\n\n"
-        
-        "<b>❓ Tips:</b>\n"
-        "• Use exact anime names for better results\n"
-        "• Add 'Movie' for movie searches\n"
-        "• Check the source links for more details\n"
-        "• Works with special characters (e.g., Spy × Family)\n\n"
-        
-        "Need more help? Try /start"
+
+        "📊 Search Result me:\n"
+        "🎬 Anime Name\n"
+        "🇮🇳 Hindi Dub\n"
+        "📺 Platform\n"
+        "📀 Season\n"
+        "🎬 Episodes\n"
+        "🌐 Languages\n"
+        "📊 Status\n"
+        "📅 Last/Release information\n"
+        "⏭ Next Episode (agar available ho)\n"
+        "🏢 Studio\n"
+        "🎙 Dub By\n"
+        "🔎 Source\n\n"
+
+        "💡 Tips:\n"
+        "• Short/common anime name bhi try kar sakte ho.\n"
+        "• Example: /anime Re Zero\n"
+        "• Movie search ke liye naam ke saath Movie likho.\n"
+        "• Spelling sahi rakhne par result better milega.\n\n"
+
+        "🔎 Data source: DC"
     )
-    
-    await update.message.reply_html(help_message)
+
+    await update.message.reply_text(message)
 
 
-async def anime_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle /anime command
-    Searches for anime and returns Hindi dub information with poster
-    
-    Args:
-        update: Telegram update
-        context: Telegram context
-    """
+# ============================================================
+# ANIME COMMAND
+# ============================================================
+
+async def anime_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Handle /anime <anime name> command."""
+
+    if not update.message:
+        return
+
+    user = update.effective_user
+    user_id = user.id if user else "unknown"
+
+    chat = update.effective_chat
+    chat_type = chat.type if chat else "unknown"
+
     logger.info(
-        f"Anime command received from user {update.effective_user.id} "
-        f"in {'private' if update.message.chat.type == 'private' else 'group'} chat"
+        f"Anime command received from user {user_id} "
+        f"in {chat_type} chat"
     )
-    
-    # Check if anime name is provided
-    if not context.args or len(context.args) == 0:
+
+    # --------------------------------------------------------
+    # Check anime name
+    # --------------------------------------------------------
+
+    if not context.args:
         await update.message.reply_text(
-            "❌ <b>Usage:</b> /anime &lt;anime_name&gt;\n\n"
+            "❌ Usage:\n"
+            "/anime <anime name>\n\n"
             "Examples:\n"
             "/anime Naruto\n"
-            "/anime Death Note\n"
-            "/anime Spy x Family\n"
-            "/anime Naruto Movie",
-            parse_mode='HTML'
+            "/anime Solo Leveling\n"
+            "/anime Re Zero"
         )
         return
 
-    # Get anime name from arguments
-    anime_name = ' '.join(context.args).strip()
-    
-    if not anime_name or len(anime_name) == 0:
+    anime_name = " ".join(context.args).strip()
+
+    if not anime_name:
         await update.message.reply_text(
-            "❌ Please provide an anime name.\n"
-            "Example: /anime Naruto"
+            "❌ Please provide an anime name.\n\n"
+            "Example:\n"
+            "/anime Naruto"
         )
         return
 
-    # Show loading message
+    # --------------------------------------------------------
+    # Loading message
+    # --------------------------------------------------------
+
     loading_message = await update.message.reply_text(
-        f"🔍 Searching for '<b>{html.escape(anime_name)}</b>'...",
-        parse_mode='HTML'
+        f"🔍 Searching for: {anime_name}"
     )
 
     try:
-        # Fetch anime information
+        # ----------------------------------------------------
+        # Fetch information from anime_scraper.py
+        # ----------------------------------------------------
+
         anime_info = get_anime_info(anime_name)
 
+        # ----------------------------------------------------
         # Delete loading message
+        # ----------------------------------------------------
+
         try:
             await loading_message.delete()
-        except Exception as e:
-            logger.debug(f"Could not delete loading message: {e}")
-
-        if anime_info:
-            # Send anime information with poster
-            await send_anime_with_poster(update, anime_info)
-            logger.info(f"Successfully returned anime info for: {anime_name}")
-        else:
-            # Anime not found
-            await update.message.reply_html(
-                f"😕 <b>Anime not found:</b> {html.escape(anime_name)}\n\n"
-                "Try:\n"
-                "• Checking the spelling\n"
-                "• Using English title\n"
-                "• Using alternative names\n"
-                "• Adding 'Movie' if searching for a movie"
+        except Exception as exc:
+            logger.debug(
+                f"Could not delete loading message: {exc}"
             )
-            logger.info(f"Anime not found in database: {anime_name}")
 
-    except Exception as e:
-        # Handle unexpected errors
+        # ----------------------------------------------------
+        # No result
+        # ----------------------------------------------------
+
+        if not anime_info:
+            await update.message.reply_text(
+                f"😕 Anime not found:\n"
+                f"{anime_name}\n\n"
+                "Try:\n"
+                "• Another spelling\n"
+                "• English title\n"
+                "• Short/common title\n"
+                "• Add Movie if it is a movie"
+            )
+
+            logger.info(
+                f"Anime not found: {anime_name}"
+            )
+            return
+
+        # ----------------------------------------------------
+        # Send result
+        # ----------------------------------------------------
+
+        await send_anime_with_poster(
+            update,
+            anime_info,
+        )
+
+        logger.info(
+            f"Successfully returned anime info: {anime_name}"
+        )
+
+    except Exception as exc:
+        logger.exception(
+            f"Error processing anime command "
+            f"for '{anime_name}': {exc}"
+        )
+
         try:
             await loading_message.delete()
-        except:
+        except Exception:
             pass
-        logger.error(f"Error processing anime command for '{anime_name}': {str(e)}")
+
         await update.message.reply_text(
-            "❌ <b>Error:</b> Unable to fetch anime information.\n"
-            "This might be temporary. Please try again in a moment.\n\n"
-            "If the problem persists, check that the anime name is correct.",
-            parse_mode='HTML'
+            "❌ Error: Unable to fetch anime information.\n\n"
+            "Ye temporary problem ho sakti hai.\n"
+            "Thodi der baad dobara try karo."
         )
 
 
-async def send_anime_with_poster(update: Update, anime_info: Dict) -> None:
+# ============================================================
+# SEND ANIME INFORMATION
+# ============================================================
+
+async def send_anime_with_poster(
+    update: Update,
+    anime_info: Any,
+) -> None:
     """
-    Send anime information with poster image
-    
-    Args:
-        update: Telegram update
-        anime_info: Dictionary with anime information
+    Send anime information.
+
+    Supports:
+        - AnimeInfo dataclass
+        - Dictionary (backward compatibility)
     """
-    poster_url = anime_info.get('poster_url')
-    caption = _format_anime_info(anime_info)
+
+    if not update.message:
+        return
 
     try:
-        # If poster URL is available, send as photo with caption
+        # ----------------------------------------------------
+        # AnimeInfo object
+        # ----------------------------------------------------
+
+        if isinstance(anime_info, AnimeInfo):
+            poster_url = anime_info.poster
+
+            # Use scraper's official formatter.
+            caption = format_anime_info(anime_info)
+
+        # ----------------------------------------------------
+        # Dictionary fallback
+        # ----------------------------------------------------
+
+        elif isinstance(anime_info, dict):
+            poster_url = (
+                anime_info.get("poster")
+                or anime_info.get("poster_url")
+            )
+
+            caption = _format_dict_anime_info(
+                anime_info
+            )
+
+        # ----------------------------------------------------
+        # Unknown object
+        # ----------------------------------------------------
+
+        else:
+            logger.error(
+                "Unsupported anime info type: "
+                f"{type(anime_info)}"
+            )
+
+            await update.message.reply_text(
+                "❌ Invalid anime information received."
+            )
+            return
+
+        # ----------------------------------------------------
+        # Try poster first
+        # ----------------------------------------------------
+
         if poster_url and _is_valid_url(poster_url):
             try:
                 await update.message.reply_photo(
                     photo=poster_url,
                     caption=caption,
-                    parse_mode='HTML'
                 )
-                logger.debug(f"Sent anime info with poster: {poster_url}")
+
+                logger.debug(
+                    f"Anime poster sent successfully: "
+                    f"{poster_url}"
+                )
+
                 return
-            except Exception as e:
-                logger.warning(f"Failed to send poster from URL {poster_url}: {e}")
-                # Fall back to text-only if poster fails
 
-        # If no poster or poster failed, send as text
-        await update.message.reply_html(caption)
-        logger.debug("Sent anime info as text (no poster)")
+            except Exception as exc:
+                logger.warning(
+                    f"Poster sending failed: {exc}"
+                )
 
-    except Exception as e:
-        logger.error(f"Error sending anime message: {e}")
-        await update.message.reply_text("Error sending anime information.")
+        # ----------------------------------------------------
+        # Text fallback
+        # ----------------------------------------------------
 
+        await update.message.reply_text(
+            caption
+        )
+
+        logger.debug(
+            "Anime information sent without poster."
+        )
+
+    except Exception as exc:
+        logger.exception(
+            f"Error sending anime information: {exc}"
+        )
+
+        try:
+            await update.message.reply_text(
+                "❌ Error sending anime information."
+            )
+        except Exception:
+            pass
+
+
+# ============================================================
+# URL VALIDATION
+# ============================================================
 
 def _is_valid_url(url: str) -> bool:
-    """Check if URL is valid."""
-    if not url:
+    """Return True if URL is HTTP/HTTPS."""
+
+    if not isinstance(url, str):
         return False
-    return url.startswith(('http://', 'https://'))
+
+    url = url.strip()
+
+    return url.startswith(
+        (
+            "http://",
+            "https://",
+        )
+    )
 
 
-def _format_anime_info(anime_info: Dict) -> str:
+# ============================================================
+# DICT FORMATTER
+# ============================================================
+
+def _format_dict_anime_info(
+    anime_info: dict,
+) -> str:
     """
-    Format anime information for display
-    
-    Args:
-        anime_info: Dictionary with anime information
-        
-    Returns:
-        Formatted HTML string for Telegram
-    """
-    name = html.escape(anime_info.get('name', 'Unknown'))
-    hindi_dub = anime_info.get('hindi_dub', 'Not Verified')
-    platform = anime_info.get('platform')
-    dub_by = anime_info.get('dub_by')
-    seasons = anime_info.get('seasons')
-    episodes = anime_info.get('episodes')
-    status = anime_info.get('status')
-    languages = anime_info.get('languages')
-    release_date = anime_info.get('release_date')
-    source = anime_info.get('source', 'DC')
-    source_link = anime_info.get('source_link')
-    mal_url = anime_info.get('mal_url')
+    Backward-compatible formatter for dictionary data.
 
-    # Build response
-    response = f"<b>🎬 Anime:</b> {name}\n"
-    response += f"<b>🇮🇳 Hindi Dub:</b> {hindi_dub}\n"
+    This is only used if another part of the bot sends
+    dictionary data instead of AnimeInfo.
+    """
+
+    name = _safe_text(
+        anime_info.get("name"),
+        "Unknown",
+    )
+
+    hindi_dub = _safe_text(
+        anime_info.get("hindi_dub"),
+        "Not Verified",
+    )
+
+    platform = _safe_text(
+        anime_info.get("platform")
+    )
+
+    season = _safe_text(
+        anime_info.get("season")
+        or anime_info.get("seasons")
+    )
+
+    episodes = _safe_text(
+        anime_info.get("episodes")
+    )
+
+    languages = _safe_text(
+        anime_info.get("languages")
+    )
+
+    status = _safe_text(
+        anime_info.get("status")
+    )
+
+    last_episode = _safe_text(
+        anime_info.get("last_episode")
+    )
+
+    last_release = _safe_text(
+        anime_info.get("last_release")
+    )
+
+    next_episode = _safe_text(
+        anime_info.get("next_episode")
+    )
+
+    expected_release = _safe_text(
+        anime_info.get("expected_release")
+    )
+
+    schedule = _safe_text(
+        anime_info.get("schedule")
+    )
+
+    studio = _safe_text(
+        anime_info.get("studio")
+    )
+
+    dub_by = _safe_text(
+        anime_info.get("dub_by")
+    )
+
+    source = _safe_text(
+        anime_info.get("source"),
+        "DC",
+    )
+
+    lines = [
+        f"🎬 Anime: {name}",
+        "",
+        f"🇮🇳 Hindi Dub: {hindi_dub}",
+    ]
 
     if platform:
-        response += f"<b>📺 Platform:</b> {html.escape(platform)}\n"
+        lines.append(
+            f"📺 Platform: {platform}"
+        )
 
-    if dub_by:
-        response += f"<b>🎙️ Dub By:</b> {html.escape(dub_by)}\n"
-
-    if seasons:
-        response += f"<b>📀 Season:</b> {seasons}\n"
+    if season:
+        lines.append(
+            f"📀 Season: {season}"
+        )
 
     if episodes:
-        response += f"<b>🎬 Episodes:</b> {episodes}\n"
-
-    if status:
-        response += f"<b>🔄 Status:</b> {status}\n"
+        lines.append(
+            f"🎬 Episodes: {episodes}"
+        )
 
     if languages:
-        response += f"<b>🌐 Languages:</b> {languages}\n"
+        lines.extend(
+            [
+                "",
+                f"🌐 Languages: {languages}",
+            ]
+        )
 
-    if release_date:
-        response += f"<b>🗓️ Release Date:</b> {release_date}\n"
+    if status:
+        lines.extend(
+            [
+                "",
+                f"📊 Status: {status}",
+            ]
+        )
 
-    response += f"\n<b>🔎 Source:</b> {source}"
+    if last_episode:
+        lines.append(
+            f"📅 Last Episode: {last_episode}"
+        )
 
-    if source_link:
-        response += f" • <a href='{source_link}'>View Article</a>"
-    
-    if mal_url:
-        response += f" • <a href='{mal_url}'>MyAnimeList</a>"
+    if last_release:
+        lines.append(
+            f"🗓 Last Release: {last_release}"
+        )
 
-    return response
-    
+    if next_episode:
+        lines.append(
+            f"⏭ Next Episode: {next_episode}"
+        )
+
+    if expected_release:
+        lines.append(
+            f"📅 Expected Release: {expected_release}"
+        )
+
+    if schedule:
+        lines.append(
+            f"⏰ Schedule: {schedule}"
+        )
+
+    if studio:
+        lines.extend(
+            [
+                "",
+                f"🏢 Studio: {studio}",
+            ]
+        )
+
+    if dub_by:
+        lines.append(
+            f"🎙 Dub By: {dub_by}"
+        )
+
+    lines.extend(
+        [
+            "",
+            f"🔎 Source: {source}",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# SAFE TEXT
+# ============================================================
+
+def _safe_text(
+    value: Any,
+    default: str = "",
+) -> str:
+    """Convert value to clean display text."""
+
+    if value is None:
+        return default
+
+    if isinstance(value, list):
+        value = " • ".join(
+            str(item)
+            for item in value
+            if item
+        )
+
+    value = str(value).strip()
+
+    return value if value else default
