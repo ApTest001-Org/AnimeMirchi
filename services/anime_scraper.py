@@ -996,22 +996,14 @@ async def scrape_franchise_movies(
 def build_franchise_info(
     query: str,
     franchise_key: str,
-    series: list["AnimeInfo"],
+    series: list[AnimeInfo],
     movies: list[str],
-) -> "AnimeInfo":
-
-    """
-    Keep the original scraper API compatible by returning one
-    AnimeInfo object.
-
-    The object itself contains the franchise's separate series
-    and movie information.
-    """
+) -> AnimeInfo:
 
     franchise_name = query.strip()
 
     total_episodes = 0
-    available_episodes = 0
+    hindi_total = 0
 
     for anime in series:
 
@@ -1019,32 +1011,31 @@ def build_franchise_info(
             anime.total_episodes or 0
         )
 
-        available_episodes += (
-            anime.available_episodes or 0
-        )
+        if anime.available_episodes:
 
-    # Use the first Hindi series as the base object so existing
-    # code which expects AnimeInfo continues to work.
+            hindi_total += (
+                anime.available_episodes.get(
+                    "Hindi",
+                    0
+                )
+            )
 
     if series:
 
         base = series[0]
 
         base.title = franchise_name
-
         base.franchise_key = franchise_key
-
         base.franchise_series = series
-
         base.franchise_movies = movies
 
         base.total_episodes = total_episodes
 
-        base.available_episodes = available_episodes
+        base.available_episodes = {
+            "Hindi": hindi_total
+        }
 
         return base
-
-    # If no Hindi series was found, still return a valid object.
 
     return AnimeInfo(
         title=franchise_name,
@@ -1053,8 +1044,9 @@ def build_franchise_info(
         franchise_movies=movies,
         hindi_available=bool(movies),
         total_episodes=total_episodes,
-        available_episodes=a
-        vailable_episodes,
+        available_episodes={
+            "Hindi": hindi_total
+        },
     )
 
 # ============================================================
