@@ -637,6 +637,12 @@ async def fetch_cached(
 # PART 3/7 — SEARCH + TITLE RESOLVER (CONTINUED)
 # ============================================================
 
+        original_html = await fetch_cached(
+            session,
+            original_url,
+            ttl=ONGOING_CACHE_TTL
+        )
+
         original_candidates = parse_search_results(
             original_html,
             query
