@@ -355,12 +355,26 @@ async def send_anime_with_poster(
 
         # ----------------------------------------------------
         # Send full anime information
+        # Always send it separately from the poster.
         # Split long results to stay within Telegram's limit.
         # ----------------------------------------------------
 
+        if not caption or not caption.strip():
+            logger.error(
+                "Anime information formatter returned empty text."
+            )
+            await update.message.reply_text(
+                "❌ Anime information empty aa rahi hai. "
+                "Scraper formatter ko check karna hoga."
+            )
+            return
+
         while caption:
             if len(caption) <= 4000:
-                await update.message.reply_text(caption)
+                await update.message.reply_text(
+                    caption,
+                    disable_web_page_preview=True
+                )
                 break
 
             split_at = caption.rfind(
@@ -373,7 +387,8 @@ async def send_anime_with_poster(
                 split_at = 4000
 
             await update.message.reply_text(
-                caption[:split_at]
+                caption[:split_at],
+                disable_web_page_preview=True
             )
 
             caption = caption[
@@ -382,10 +397,6 @@ async def send_anime_with_poster(
 
         logger.debug(
             "Anime information sent successfully."
-        )
-
-        logger.debug(
-            "Anime information sent without poster."
         )
 
     except Exception as exc:
@@ -608,4 +619,4 @@ def _safe_text(
 
     return value if value else default
 
-    
+
