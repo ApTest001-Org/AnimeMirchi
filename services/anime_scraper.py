@@ -1627,9 +1627,10 @@ async def search_anime(
 
         try:
 
-            html = await fetch_html(
-                session,
-                search_url
+        html = await fetch_cached(
+             session,
+             search_url
+        )
             )
 
             if not html:
@@ -4042,7 +4043,7 @@ class AnimeScraper:
                 "AnimeScraper session is not initialized"
             )
 
-        html = await fetch_html(
+        html = await fetch_cached(
             self.session,
             url,
         )
