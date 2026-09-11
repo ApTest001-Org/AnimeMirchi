@@ -11,7 +11,7 @@ import time
 import html
 import unicodedata
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
@@ -350,8 +350,7 @@ def canonical_alias(query: str) -> Optional[str]:
             if score > best_score:
                 best_score = score
                 best = canonical
-
-    if best_score >= 0.78:
+         if best_score >= 0.78:
         return best
 
     return None
@@ -701,7 +700,6 @@ def extract_poster(
         soup,
         prop="og:image",
     )
-
     if image:
         return image
 
@@ -1054,7 +1052,7 @@ def detect_hindi_dub(
     )
 
     negative = any(
-        re.search(
+             re.search(
             pattern,
             combined,
             re.IGNORECASE,
@@ -1078,6 +1076,107 @@ def detect_hindi_dub(
         return False, True
 
     return False, False
+
+
+# ============================================================
+# CURRENT AIRING SCHEDULE FALLBACKS
+# ============================================================
+
+# RareAnimes can list only the Hindi-dubbed episodes currently
+# uploaded on its page.  That number must NOT be treated as the
+# total episode count of a currently-airing Japanese broadcast.
+# These schedule rules are metadata-only and are used to correct
+# the current-airing episode/status when the source page exposes
+# only the dubbed batch.
+CURRENT_AIRING_SCHEDULES = {
+    "black torch": {
+        "total_episodes": 12,
+        "start_date": "2026-07-04",
+        "weekday": "Saturday",
+        "schedule": "Every Saturday",
+    },
+}
+
+
+def _schedule_key(value: str) -> str:
+    value = clean_text(value).lower()
+    value = re.sub(r"season\s*\d+", "", value)
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def apply_current_schedule(
+    info: AnimeInfo,
+) -> AnimeInfo:
+    """Correct current-airing metadata when the source only lists dubbed episodes."""
+
+    candidates = [
+        info.name or "",
+        info.original_name or "",
+        info.matched_title or "",
+    ]
+
+    rule = None
+    for candidate in candidates:
+        key = _schedule_key(candidate)
+        for known_name, known_rule in CURRENT_AIRING_SCHEDULES.items():
+            if known_name in key:
+                rule = known_rule
+                break
+        if rule:
+            break
+
+    if not rule:
+        return info
+
+    try:
+        start = datetime.strptime(
+            rule["start_date"],
+            "%Y-%m-%d",
+        ).date()
+
+        today = datetime.now().date()
+        total = int(rule["total_episodes"])
+
+        if today < start:
+            return info
+
+        elapsed_weeks = (today - start).days // 7
+        current = min(
+            elapsed_weeks + 1,
+            total,
+        )
+
+        info.total_episodes = total
+        info.last_episode = current
+        info.episodes = current
+        info.schedule = rule["schedule"]
+
+        last_date = start + timedelta(weeks=current - 1)
+        info.last_release = last_date.strftime(
+            "%d %B %Y"
+        )
+
+        if current < total:
+            info.status = "Ongoing"
+            info.next_episode = current + 1
+
+            next_date = start + timedelta(
+                weeks=current
+            )
+            info.expected_release = next_date.strftime(
+                "%d %B %Y"
+            )
+        else:
+            info.status = "Completed"
+            info.next_episode = None
+            info.expected_release = None
+
+    except Exception:
+        # Never break normal scraping because of a schedule rule.
+        return info
+
+    return info
 
 
 # ============================================================
@@ -1305,7 +1404,7 @@ def extract_expected_release(
         if match:
 
             result = normalize_date_string(
-                match.group(1)
+                            match.group(1)
             )
 
             if result:
@@ -1577,6 +1676,12 @@ def parse_anime_page(
     info.name = clean_text(title)
     info.original_name = clean_text(title)
 
+    # RareAnimes page titles contain upload-page wording.
+    # Keep the actual anime title for known schedule rules.
+if "black torch" in _schedule_key(title):
+        info.name = "BLACK TORCH"
+        info.original_name = "BLACK TORCH"
+
     info.poster = extract_poster(soup)
 
     info.hindi_dub = hindi_dub
@@ -1651,7 +1756,6 @@ def parse_anime_page(
 # ============================================================
 # BEST MATCH
 # ============================================================
-
 def choose_best_result(
     query: str,
     results: List[Dict[str, Any]],
@@ -1887,22 +1991,54 @@ def finalize_info(
     return info
 
 
+
+# ============================================================
+# FAST IN-MEMORY CACHE
+# ============================================================
+
+_INFO_CACHE = {}
+_INFO_CACHE_TTL = 600  # 10 minutes
+
+def _cache_key(query: str) -> str:
+    return re.sub(r"\s+", " ", clean_text(query).lower()).strip()
+
+def _get_cached_info(query: str):
+    key = _cache_key(query)
+    item = _INFO_CACHE.get(key)
+    if not item:
+        return None
+    saved_at, info = item
+    if time.time() - saved_at > _INFO_CACHE_TTL:
+        _INFO_CACHE.pop(key, None)
+        return None
+    return info
+
+def _set_cached_info(query: str, info):
+    key = _cache_key(query)
+    _INFO_CACHE[key] = (time.time(), info)
+    # Keep memory bounded.
+    if len(_INFO_CACHE) > 100:
+        oldest = min(_INFO_CACHE, key=lambda k: _INFO_CACHE[k][0])
+        _INFO_CACHE.pop(oldest, None)
+
+
 # ============================================================
 # MAIN SCRAPER FUNCTION
 # ============================================================
 
 def get_anime_info(
     query: str,
-    load_seasons: bool = True,
+    load_seasons: bool = False,
 ) -> Optional[AnimeInfo]:
     """
-    Main function used by anime_service.py / bot.py.
+    Fast main scraper.
 
-    Example:
+    Default behavior intentionally does NOT load additional season pages.
+    The main RareAnimes page is parsed first so normal searches are much faster.
+    Results are cached for 10 minutes.
 
-        info = get_anime_info("Re Zero")
-
-    Returns AnimeInfo or None.
+    Set load_seasons=True only when the caller explicitly needs season
+    discovery.
     """
 
     query = clean_text(query)
@@ -1910,15 +2046,28 @@ def get_anime_info(
     if not query:
         return None
 
-    # Search.
-    results = search_rareanimes(
-        query
-    )
+    # --------------------------------------------------------
+    # CACHE
+    # --------------------------------------------------------
+
+    cached = _get_cached_info(query)
+
+    if cached is not None:
+        return cached
+
+    # --------------------------------------------------------
+    # SEARCH
+    # --------------------------------------------------------
+
+    results = search_rareanimes(query)
 
     if not results:
         return None
 
-    # Best matching page.
+    # --------------------------------------------------------
+    # BEST MATCH
+    # --------------------------------------------------------
+
     best = choose_best_result(
         query,
         results,
@@ -1926,6 +2075,10 @@ def get_anime_info(
 
     if not best:
         return None
+
+    # --------------------------------------------------------
+    # MAIN PAGE ONLY
+    # --------------------------------------------------------
 
     info = parse_anime_page(
         best["url"],
@@ -1935,15 +2088,33 @@ def get_anime_info(
     if not info:
         return None
 
-    # Load season pages.
+    # --------------------------------------------------------
+    # OPTIONAL SEASON LOADING
+    # --------------------------------------------------------
+
     if load_seasons:
         info = load_additional_seasons(
             info
         )
 
-    return finalize_info(
+    # --------------------------------------------------------
+    # FINALIZE
+    # --------------------------------------------------------
+
+    info = finalize_info(
         info
     )
+
+    # --------------------------------------------------------
+    # CACHE
+        # --------------------------------------------------------
+
+    _set_cached_info(
+        query,
+        info,
+    )
+
+    return info
 
 
 # ============================================================
@@ -2286,4 +2457,5 @@ if __name__ == "__main__":
 
         print(
             "Anime not found or source unavailable."
-        )
+)
+        
