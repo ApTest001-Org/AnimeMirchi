@@ -390,6 +390,38 @@ def normalize_title(
     ).strip()
 
 
+def title_match_score(
+    query: str,
+    title: str
+) -> float:
+
+    q = normalize_title(query)
+    t = normalize_title(title)
+
+    if not q or not t:
+        return 0.0
+
+    if q == t:
+        return 100.0
+
+    if q in t:
+        return 90.0
+
+    if t in q:
+        return 80.0
+
+    q_words = set(q.split())
+    t_words = set(t.split())
+
+    if not q_words or not t_words:
+        return 0.0
+
+    overlap = len(q_words & t_words)
+
+    return (
+        overlap / len(q_words)
+    ) * 70.0
+
 # ------------------------------------------------------------
 # Slug normalize
 # ------------------------------------------------------------
