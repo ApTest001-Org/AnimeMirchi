@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Telegram Bot Configuration
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_BOT_TOKEN = os.getenv('8844680214:AAGhZVGj4QIJ8L51AkSvFSZG6kOMfrHFV6k')
 
 # Server Configuration (for Render deployment)
 PORT = int(os.getenv('PORT', 8000))
