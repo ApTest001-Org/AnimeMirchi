@@ -642,7 +642,7 @@ async def fetch_cached(
             ttl=ONGOING_CACHE_TTL
         )
 
-       original_candidates = parse_search_results(
+    original_candidates = parse_search_results(
             original_html,
             query
         )
