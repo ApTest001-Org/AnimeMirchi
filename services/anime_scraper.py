@@ -2723,3 +2723,18 @@ if __name__ == "__main__":
     asyncio.run(
         main()
     )
+    
+# ============================================================
+# BOT HELPER
+# ============================================================
+
+async def get_anime_info(query: str) -> AnimeInfo:
+    """
+    Simple helper for Telegram/Discord bot.
+
+    Example:
+        anime = await get_anime_info("re zero")
+    """
+
+    async with AnimeScraper(source="DC") as scraper:
+        return await scraper.scrape(query)
