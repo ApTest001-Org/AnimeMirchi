@@ -4287,8 +4287,6 @@ def make_error_result(
 # ============================================================
 # FINAL PUBLIC RESULT
 # ============================================================
-
-
 async def search_and_format(
     query: str,
 ) -> tuple[
@@ -4356,21 +4354,7 @@ async def search_and_format(
             make_error_result(
                 query
             )
-    )
-
-                        series_results.append(
-                            anime
-                        )
-
-                except Exception as exc:
-
-                    logger.warning(
-                        "Could not scrape franchise "
-                        "series %s: %s",
-                        series_name,
-                        exc
-                    )
-
+        )
             # ------------------------------------------------
             # Search additional pages for series/seasons
             # ------------------------------------------------
