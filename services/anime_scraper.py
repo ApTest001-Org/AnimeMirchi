@@ -4665,39 +4665,16 @@ def format_single_anime_info(
 
         lines.append("")
 
-        lines.append(
-            "📚 Hindi Episodes:"
-        )
-
         hindi_episodes = [
-
             episode
             for episode in anime.episodes
-            if (
-                "Hindi"
-                in episode.languages
-            )
+            if "Hindi" in episode.languages
         ]
 
-        if hindi_episodes:
-
-            for episode in hindi_episodes:
-
-                lines.append(
-                    format_episode(
-                        episode
-                    )
-                )
-
-        else:
-
-            lines.append(
-                "No Hindi episode data found."
-            )
-
-    return "\n".join(
-        lines
+        lines.append(
+            f"📚 Hindi Episodes: {len(hindi_episodes)}"
         )
+        
     # ============================================================
 # PART 7/7 — FRANCHISE FORMATTER + PUBLIC API
 # ============================================================
