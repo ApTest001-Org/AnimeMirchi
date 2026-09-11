@@ -647,7 +647,7 @@ async def fetch_cached(
             query
         )
 
-        candidates.extend(
+    candidates.extend(
             original_candidates
         )
 
