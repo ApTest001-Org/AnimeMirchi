@@ -1630,7 +1630,6 @@ async def search_anime(
     for search_url in search_urls:
 
         try:
-
             html = await fetch_cached(
                 session,
                 search_url
