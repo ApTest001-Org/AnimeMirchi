@@ -1,21 +1,21 @@
-# ============================================================
-# anime_scraper.py
-# Anime Hindi Info Bot
-# ============================================================
-
 from __future__ import annotations
 
-import re
 import json
+import re
 import time
-import html
 import unicodedata
-from dataclasses import dataclass, field, asdict
+
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote, urljoin, urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional
+from urllib.parse import (
+    quote,
+    urljoin,
+    urlparse,
+    parse_qs,
+)
 
 import requests
 from bs4 import BeautifulSoup
@@ -27,22 +27,16 @@ from bs4 import BeautifulSoup
 
 BASE_URL = "https://www.rareanimes.mov"
 
-# Only metadata pages are used.
-# We intentionally do not expose/download episode links.
 SEARCH_URL = BASE_URL + "/?s={query}"
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0 Safari/537.36"
-)
+SOURCE_NAME = "DC"
 
-REQUEST_TIMEOUT = 12
-SEARCH_TIMEOUT = 10
-MAX_SEARCH_RESULTS = 12
-MAX_SEASON_PAGES = 30
+REQUEST_TIMEOUT = 8
+SEARCH_TIMEOUT = 5
 
-# Languages that the bot is allowed to display.
+MAX_SEARCH_RESULTS = 15
+MAX_SEASON_PAGES = 8
+
 DISPLAY_LANGUAGES = [
     "Hindi",
     "English",
@@ -51,25 +45,26 @@ DISPLAY_LANGUAGES = [
     "Japanese",
 ]
 
-# Common aliases / short names.
+
+# ============================================================
+# KNOWN ALIASES
+# ============================================================
+
 ALIASES = {
     "naruto": [
         "naruto",
-        "naruto 2002",
-        "naruto classic",
         "naruto season 1",
     ],
     "naruto shippuden": [
         "naruto shippuden",
-        "naruto shippuden anime",
+        "naruto shipuden",
         "naruto shippuden series",
     ],
     "re zero": [
         "re zero",
-        "rezero",
         "re:zero",
+        "rezero",
         "re zero starting life in another world",
-        "re:zero starting life in another world",
     ],
     "solo leveling": [
         "solo leveling",
@@ -78,7 +73,6 @@ ALIASES = {
     "mushoku tensei": [
         "mushoku tensei",
         "jobless reincarnation",
-        "mushoku tensei jobless reincarnation",
     ],
     "one piece": [
         "one piece",
@@ -92,7 +86,7 @@ ALIASES = {
 
 
 # ============================================================
-# DATA CLASS
+# DATA MODEL
 # ============================================================
 
 @dataclass
@@ -105,15 +99,21 @@ class AnimeInfo:
     hindi_dub: bool = False
     hindi_status_known: bool = False
 
-    platform: List[str] = field(default_factory=list)
+    platform: List[str] = field(
+        default_factory=list
+    )
 
     season: Optional[int] = None
-    seasons: List[int] = field(default_factory=list)
+    seasons: List[int] = field(
+        default_factory=list
+    )
 
     episodes: Optional[int] = None
     total_episodes: Optional[int] = None
 
-    languages: List[str] = field(default_factory=list)
+    languages: List[str] = field(
+        default_factory=list
+    )
 
     status: str = "Unknown"
 
@@ -127,80 +127,79 @@ class AnimeInfo:
     studio: Optional[str] = None
     dub_by: Optional[str] = None
 
-    source: str = "DC"
-
+    source: str = SOURCE_NAME
     source_url: Optional[str] = None
 
-    # Extra internal fields
     matched_title: Optional[str] = None
     confidence: float = 0.0
 
-    # Season-specific raw information
-    season_pages: List[str] = field(default_factory=list)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+    season_pages: List[str] = field(
+        default_factory=list
+    )
 
 
 # ============================================================
-# SESSION
+# HTTP SESSION
 # ============================================================
 
 session = requests.Session()
 
 session.headers.update(
     {
-        "User-Agent": USER_AGENT,
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;"
-            "q=0.9,image/avif,image/webp,*/*;q=0.8"
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/131.0 Safari/537.36"
         ),
         "Accept-Language": "en-US,en;q=0.9",
-        "Connection": "keep-alive",
+        "Accept": "text/html,application/xhtml+xml",
     }
 )
 
+
 # ============================================================
-# TEXT UTILITIES
+# TEXT HELPERS
 # ============================================================
 
 def clean_text(value: Any) -> str:
-    """Clean HTML/text safely."""
-
     if value is None:
         return ""
 
-    if isinstance(value, (list, tuple)):
-        value = " ".join(str(x) for x in value)
-
     value = str(value)
 
-    value = html.unescape(value)
-    value = re.sub(r"<[^>]+>", " ", value)
-    value = re.sub(r"\s+", " ", value)
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    )
 
     return value.strip()
 
 
 def normalize_text(value: str) -> str:
     """
-    Normalize anime names for matching.
+    Generic anime title normalization.
 
     Examples:
         Re Zero
         re:zero
         REZERO
-    can become comparable strings.
+
+    become comparable strings.
     """
 
     if not value:
         return ""
 
-    value = unicodedata.normalize("NFKD", value)
+    value = unicodedata.normalize(
+        "NFKD",
+        value,
+    )
 
     value = value.lower()
 
-    # Common punctuation replacements.
     value = value.replace(":", " ")
     value = value.replace("-", " ")
     value = value.replace("_", " ")
@@ -208,7 +207,6 @@ def normalize_text(value: str) -> str:
     value = value.replace("—", " ")
     value = value.replace(".", " ")
 
-    # Remove season words only for matching.
     value = re.sub(
         r"\bseason\s+\d+\b",
         " ",
@@ -216,9 +214,13 @@ def normalize_text(value: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    value = re.sub(r"\bpart\s+\d+\b", " ", value)
+    value = re.sub(
+        r"\bpart\s+\d+\b",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
 
-    # Remove common page suffixes.
     value = re.sub(
         r"\b(hindi|dubbed|dub|episodes?|download|hd|subbed|"
         r"english|tamil|telugu|japanese)\b",
@@ -227,27 +229,102 @@ def normalize_text(value: str) -> str:
         flags=re.IGNORECASE,
     )
 
-    value = re.sub(r"[^a-z0-9]+", " ", value)
+    value = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        value,
+    )
 
-    value = re.sub(r"\s+", " ", value).strip()
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    )
 
-    return value
+    return value.strip()
 
 
 def compact_normalize(value: str) -> str:
-    return normalize_text(value).replace(" ", "")
+    return normalize_text(value).replace(
+        " ",
+        "",
+    )
 
 
 def tokenize(value: str) -> List[str]:
     return [
         token
         for token in normalize_text(value).split()
-        if len(token) >= 2
+        if token
     ]
 
 
-def similarity(a: str, b: str) -> float:
-    """Combined fuzzy similarity."""
+def slug_normalize(value: str) -> str:
+    """Normalize URL slug/title into comparable text."""
+
+    if not value:
+        return ""
+
+    value = value.lower()
+
+    value = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        value,
+    )
+
+    value = re.sub(
+        r"\b(season|part)\s*\d+\b",
+        " ",
+        value,
+    )
+
+    value = re.sub(
+        r"\b(hindi|dubbed|dub|episodes?|download|hd|subbed|"
+        r"english|tamil|telugu|japanese)\b",
+        " ",
+        value,
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        value,
+    ).strip()
+
+
+def slug_from_url(url: str) -> str:
+    try:
+        path = urlparse(url).path.rstrip("/")
+
+        slug = path.rsplit(
+            "/",
+            1,
+        )[-1]
+
+        return slug_normalize(slug)
+
+    except Exception:
+        return ""
+
+
+def compact_tokens(value: str) -> List[str]:
+    return [
+        x
+        for x in normalize_text(value).split()
+        if x
+    ]
+
+
+# ============================================================
+# FUZZY MATCHING
+# ============================================================
+
+def similarity(
+    a: str,
+    b: str,
+) -> float:
+    """Generic fuzzy matching for short/common anime names."""
 
     na = normalize_text(a)
     nb = normalize_text(b)
@@ -255,46 +332,82 @@ def similarity(a: str, b: str) -> float:
     if not na or not nb:
         return 0.0
 
+    ca = compact_normalize(a)
+    cb = compact_normalize(b)
+
     if na == nb:
         return 1.0
 
-    if compact_normalize(a) == compact_normalize(b):
-        return 0.98
+    if ca == cb:
+        return 0.99
 
-    seq = SequenceMatcher(None, na, nb).ratio()
+    seq = SequenceMatcher(
+        None,
+        na,
+        nb,
+    ).ratio()
 
-    ta = set(tokenize(a))
-    tb = set(tokenize(b))
+    ta = set(
+        compact_tokens(a)
+    )
+
+    tb = set(
+        compact_tokens(b)
+    )
 
     if ta and tb:
-        overlap = len(ta & tb) / max(len(ta), len(tb))
+        overlap = (
+            len(ta & tb)
+            / max(
+                len(ta),
+                len(tb),
+            )
+        )
     else:
         overlap = 0.0
 
-    # Containment is useful for short names.
     containment = 0.0
 
     if na in nb or nb in na:
-        shorter = min(len(na), len(nb))
-        longer = max(len(na), len(nb))
+        shorter = min(
+            len(na),
+            len(nb),
+        )
+
+        longer = max(
+            len(na),
+            len(nb),
+        )
 
         if longer:
-            containment = shorter / longer
+            containment = (
+                shorter / longer
+            )
+
+    compact_seq = SequenceMatcher(
+        None,
+        ca,
+        cb,
+    ).ratio()
 
     return max(
-        seq * 0.65 + overlap * 0.35,
-        containment * 0.90,
+        seq * 0.55
+        + overlap * 0.25
+        + compact_seq * 0.20,
+
+        containment * 0.94,
+
+        compact_seq * 0.88,
     )
 
 
-def query_variants(query: str) -> List[str]:
+def query_variants(
+    query: str,
+) -> List[str]:
     """
-    Generate several safe search variants.
+    Generate several search variants.
 
-    Example:
-        re zero
-        re:zero
-        rezero
+    Works for arbitrary anime names.
     """
 
     query = clean_text(query)
@@ -309,22 +422,50 @@ def query_variants(query: str) -> List[str]:
 
     add(query)
 
-    normalized = normalize_text(query)
+    normalized = normalize_text(
+        query
+    )
+
     add(normalized)
 
-    compact = compact_normalize(query)
+    compact = compact_normalize(
+        query
+    )
+
     add(compact)
 
-    # Alias expansion.
+    # Generic punctuation variants.
+    add(
+        query.replace(
+            ":",
+            " ",
+        )
+    )
+
+    add(
+        query.replace(
+            "-",
+            " ",
+        )
+    )
+
+    # Known aliases are an additional boost,
+    # not the main matching system.
     qnorm = normalize_text(query)
 
     for canonical, aliases in ALIASES.items():
-        all_names = [canonical] + aliases
+
+        all_names = [
+            canonical
+        ] + aliases
 
         for alias in all_names:
+
             if (
-                qnorm == normalize_text(alias)
-                or compact == compact_normalize(alias)
+                qnorm
+                == normalize_text(alias)
+                or compact
+                == compact_normalize(alias)
             ):
                 for item in all_names:
                     add(item)
@@ -332,7 +473,9 @@ def query_variants(query: str) -> List[str]:
     return variants[:10]
 
 
-def canonical_alias(query: str) -> Optional[str]:
+def canonical_alias(
+    query: str,
+) -> Optional[str]:
     """Return canonical alias if known."""
 
     q = normalize_text(query)
@@ -342,38 +485,44 @@ def canonical_alias(query: str) -> Optional[str]:
 
     for canonical, aliases in ALIASES.items():
 
-        candidates = [canonical] + aliases
+        candidates = [
+            canonical
+        ] + aliases
 
         for candidate in candidates:
-            score = similarity(q, candidate)
+
+            score = similarity(
+                q,
+                candidate,
+            )
 
             if score > best_score:
                 best_score = score
                 best = canonical
-         if best_score >= 0.78:
+
+    if best_score >= 0.78:
         return best
 
     return None
+
 
 # ============================================================
 # HTTP
 # ============================================================
 
-def fetch(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[str]:
+def fetch(
+    url: str,
+    timeout: int = REQUEST_TIMEOUT,
+) -> Optional[str]:
     """
     Fetch HTML safely.
-
-    Returns None on:
-      - timeout
-      - connection failure
-      - blocked request
-      - invalid response
     """
 
     if not url:
         return None
 
     try:
+
         response = session.get(
             url,
             timeout=timeout,
@@ -388,7 +537,10 @@ def fetch(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[str]:
             "",
         ).lower()
 
-        if "text/html" not in content_type:
+        if (
+            "text/html"
+            not in content_type
+        ):
             return None
 
         return response.text
@@ -404,25 +556,32 @@ def fetch(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[str]:
 # URL VALIDATION
 # ============================================================
 
-def is_our_domain(url: str) -> bool:
+def is_our_domain(
+    url: str,
+) -> bool:
+
     try:
-        host = urlparse(url).netloc.lower()
+
+        host = urlparse(
+            url
+        ).netloc.lower()
 
         return (
             host == "rareanimes.mov"
-            or host.endswith(".rareanimes.mov")
+            or host.endswith(
+                ".rareanimes.mov"
+            )
         )
 
     except Exception:
         return False
 
 
-def safe_page_url(url: str) -> Optional[str]:
+def safe_page_url(
+    url: str,
+) -> Optional[str]:
     """
     Only allow RareAnimes pages.
-
-    This prevents accidentally returning external
-    third-party download/watch URLs.
     """
 
     if not url:
@@ -430,10 +589,20 @@ def safe_page_url(url: str) -> Optional[str]:
 
     url = url.strip()
 
-    if not url.startswith(("http://", "https://")):
-        return None
+    if not url.startswith(
+        (
+            "http://",
+            "https://",
+        )
+    ):
+        url = urljoin(
+            BASE_URL,
+            url,
+        )
 
-    if not is_our_domain(url):
+    if not is_our_domain(
+        url
+    ):
         return None
 
     return url
@@ -456,9 +625,10 @@ def parse_search_results(
         "html.parser",
     )
 
-    results: List[Dict[str, Any]] = []
+    results: List[
+        Dict[str, Any]
+    ] = []
 
-    # WordPress-style search pages commonly use article/post links.
     candidates = soup.select(
         "article h2 a, "
         "article h3 a, "
@@ -472,7 +642,9 @@ def parse_search_results(
 
     for anchor in candidates:
 
-        href = anchor.get("href")
+        href = anchor.get(
+            "href"
+        )
 
         if not href:
             continue
@@ -482,13 +654,18 @@ def parse_search_results(
             href,
         )
 
-        href = safe_page_url(href)
+        href = safe_page_url(
+            href
+        )
 
         if not href:
             continue
 
         title = clean_text(
-            anchor.get_text(" ", strip=True)
+            anchor.get_text(
+                " ",
+                strip=True,
+            )
         )
 
         if not title:
@@ -501,7 +678,6 @@ def parse_search_results(
 
         seen.add(key)
 
-        # Ignore obvious navigation pages.
         lower_title = title.lower()
 
         if lower_title in {
@@ -519,6 +695,16 @@ def parse_search_results(
             title,
         )
 
+        slug_score = similarity(
+            query,
+            slug_from_url(href),
+        )
+
+        score = max(
+            score,
+            slug_score * 0.97,
+        )
+
         results.append(
             {
                 "title": title,
@@ -527,13 +713,16 @@ def parse_search_results(
             }
         )
 
-    # Also inspect generic links if the theme does not use
-    # the expected article selectors.
+    # Generic fallback for different WordPress themes.
     if not results:
 
-        for anchor in soup.find_all("a"):
+        for anchor in soup.find_all(
+            "a"
+        ):
 
-            href = anchor.get("href")
+            href = anchor.get(
+                "href"
+            )
 
             if not href:
                 continue
@@ -543,24 +732,37 @@ def parse_search_results(
                 href,
             )
 
-            href = safe_page_url(href)
+            href = safe_page_url(
+                href
+            )
 
             if not href:
                 continue
 
             title = clean_text(
-                anchor.get_text(" ", strip=True)
+                anchor.get_text(
+                    " ",
+                    strip=True,
+                )
             )
 
             if not title:
                 continue
 
-            score = similarity(
-                query,
-                title,
+            score = max(
+                similarity(
+                    query,
+                    title,
+                ),
+                similarity(
+                    query,
+                    slug_from_url(
+                        href
+                    ),
+                ) * 0.97,
             )
 
-            if score < 0.35:
+            if score < 0.24:
                 continue
 
             key = href.rstrip("/")
@@ -579,27 +781,206 @@ def parse_search_results(
             )
 
     results.sort(
-        key=lambda item: item.get("score", 0),
+        key=lambda item: item.get(
+            "score",
+            0,
+        ),
         reverse=True,
     )
 
-    return results[:MAX_SEARCH_RESULTS]
-
-
-def search_rareanimes(query: str) -> List[Dict[str, Any]]:
+    return results[
+        :MAX_SEARCH_RESULTS
+        ]
+    def search_web_fallback(
+    query: str,
+) -> List[Dict[str, Any]]:
     """
-    Search RareAnimes using several query variants.
+    Last-resort discovery.
 
-    Search requests are performed concurrently.
+    Only RareAnimes URLs are accepted.
     """
 
-    variants = query_variants(query)
+    variants = query_variants(
+        query
+    )
 
-    all_results: Dict[str, Dict[str, Any]] = {}
+    results: Dict[
+        str,
+        Dict[str, Any]
+    ] = {}
 
-    def worker(search_query: str):
+    def worker(
+        search_query: str,
+    ):
+
+        try:
+
+            ddg_url = (
+                "https://html.duckduckgo.com/html/?q="
+                + quote(
+                    "site:rareanimes.mov "
+                    + search_query
+                )
+            )
+
+            page = fetch(
+                ddg_url,
+                timeout=4,
+            )
+
+            if not page:
+                return []
+
+            soup = BeautifulSoup(
+                page,
+                "html.parser",
+            )
+
+            found = []
+
+            for a in soup.select(
+                "a.result__a, "
+                "a[data-testid='result-title-a']"
+            ):
+
+                href = a.get(
+                    "href"
+                )
+
+                title = clean_text(
+                    a.get_text(
+                        " ",
+                        strip=True,
+                    )
+                )
+
+                if not href or not title:
+                    continue
+
+                if "uddg=" in href:
+
+                    parsed = parse_qs(
+                        urlparse(
+                            href
+                        ).query
+                    )
+
+                    href = parsed.get(
+                        "uddg",
+                        [href],
+                    )[0]
+
+                href = safe_page_url(
+                    href
+                )
+
+                if not href:
+                    continue
+
+                score = max(
+                    similarity(
+                        search_query,
+                        title,
+                    ),
+                    similarity(
+                        search_query,
+                        slug_from_url(
+                            href
+                        ),
+                    ) * 0.98,
+                )
+
+                found.append(
+                    {
+                        "title": title,
+                        "url": href,
+                        "score": score,
+                    }
+                )
+
+            return found
+
+        except Exception:
+            return []
+
+    with ThreadPoolExecutor(
+        max_workers=min(
+            3,
+            len(variants),
+        )
+    ) as executor:
+
+        futures = [
+            executor.submit(
+                worker,
+                x,
+            )
+            for x in variants
+        ]
+
+        for future in as_completed(
+            futures
+        ):
+
+            try:
+
+                for item in future.result():
+
+                    key = item[
+                        "url"
+                    ].rstrip("/")
+
+                    old = results.get(
+                        key
+                    )
+
+                    if (
+                        old is None
+                        or item["score"]
+                        > old.get(
+                            "score",
+                            0,
+                        )
+                    ):
+                        results[key] = item
+
+            except Exception:
+                continue
+
+    return sorted(
+        results.values(),
+        key=lambda x: x.get(
+            "score",
+            0,
+        ),
+        reverse=True,
+    )[:MAX_SEARCH_RESULTS]
+
+
+def search_rareanimes(
+    query: str,
+) -> List[Dict[str, Any]]:
+    """
+    Search RareAnimes using several variants.
+    """
+
+    variants = query_variants(
+        query
+    )
+
+    all_results: Dict[
+        str,
+        Dict[str, Any]
+    ] = {}
+
+    def worker(
+        search_query: str,
+    ):
+
         url = SEARCH_URL.format(
-            query=quote(search_query)
+            query=quote(
+                search_query
+            )
         )
 
         page = fetch(
@@ -616,7 +997,13 @@ def search_rareanimes(query: str) -> List[Dict[str, Any]]:
         )
 
     with ThreadPoolExecutor(
-        max_workers=min(5, max(1, len(variants)))
+        max_workers=min(
+            5,
+            max(
+                1,
+                len(variants),
+            ),
+        )
     ) as executor:
 
         futures = [
@@ -627,7 +1014,9 @@ def search_rareanimes(query: str) -> List[Dict[str, Any]]:
             for variant in variants
         ]
 
-        for future in as_completed(futures):
+        for future in as_completed(
+            futures
+        ):
 
             try:
                 items = future.result()
@@ -637,26 +1026,96 @@ def search_rareanimes(query: str) -> List[Dict[str, Any]]:
 
             for item in items:
 
-                url = item["url"]
+                url = item[
+                    "url"
+                ]
 
-                old = all_results.get(url)
+                old = all_results.get(
+                    url
+                )
 
                 if old is None:
-                    all_results[url] = item
 
-                elif item["score"] > old["score"]:
-                    all_results[url] = item
+                    all_results[
+                        url
+                    ] = item
+
+                elif (
+                    item["score"]
+                    > old["score"]
+                ):
+
+                    all_results[
+                        url
+                    ] = item
 
     final = list(
         all_results.values()
     )
 
     final.sort(
-        key=lambda x: x.get("score", 0),
+        key=lambda x: x.get(
+            "score",
+            0,
+        ),
         reverse=True,
     )
 
-    return final[:MAX_SEARCH_RESULTS]
+    # If RareAnimes search misses a short/common name,
+    # use search-engine indexing to discover the RareAnimes page.
+    if (
+        not final
+        or final[0].get(
+            "score",
+            0,
+        ) < 0.32
+    ):
+
+        fallback_results = (
+            search_web_fallback(
+                query
+            )
+        )
+
+        for item in fallback_results:
+
+            url = item[
+                "url"
+            ]
+
+            old = all_results.get(
+                url
+            )
+
+            if (
+                old is None
+                or item["score"]
+                > old.get(
+                    "score",
+                    0,
+                )
+            ):
+
+                all_results[
+                    url
+                ] = item
+
+        final = list(
+            all_results.values()
+        )
+
+        final.sort(
+            key=lambda x: x.get(
+                "score",
+                0,
+            ),
+            reverse=True,
+        )
+
+    return final[
+        :MAX_SEARCH_RESULTS
+    ]
+
 
 # ============================================================
 # PAGE PARSING HELPERS
@@ -672,38 +1131,50 @@ def get_meta(
     tag = None
 
     if name:
+
         tag = soup.find(
             "meta",
-            attrs={"name": name},
+            attrs={
+                "name": name
+            },
         )
 
-    if tag is None and prop:
+    if (
+        tag is None
+        and prop
+    ):
+
         tag = soup.find(
             "meta",
-            attrs={"property": prop},
+            attrs={
+                "property": prop
+            },
         )
 
     if tag is None:
         return None
 
-    content = tag.get("content")
+    content = tag.get(
+        "content"
+    )
 
-    return clean_text(content)
+    return clean_text(
+        content
+    )
 
 
 def extract_poster(
     soup: BeautifulSoup,
 ) -> Optional[str]:
 
-    # OpenGraph image.
     image = get_meta(
         soup,
         prop="og:image",
     )
+
     if image:
         return image
 
-    # Twitter image.
     image = get_meta(
         soup,
         name="twitter:image",
@@ -712,7 +1183,6 @@ def extract_poster(
     if image:
         return image
 
-    # Article featured image.
     selectors = [
         "article img",
         ".post-thumbnail img",
@@ -733,7 +1203,9 @@ def extract_poster(
         src = (
             img.get("src")
             or img.get("data-src")
-            or img.get("data-lazy-src")
+            or img.get(
+                "data-lazy-src"
+            )
         )
 
         if not src:
@@ -759,14 +1231,21 @@ def page_title(
     if og_title:
         return og_title
 
-    h1 = soup.find("h1")
+    h1 = soup.find(
+        "h1"
+    )
 
     if h1:
+
         return clean_text(
-            h1.get_text(" ", strip=True)
+            h1.get_text(
+                " ",
+                strip=True,
+            )
         )
 
     if soup.title:
+
         return clean_text(
             soup.title.get_text(
                 " ",
@@ -781,16 +1260,25 @@ def body_text(
     soup: BeautifulSoup,
 ) -> str:
 
-    # Remove scripts/styles.
     for tag in soup(
-        ["script", "style", "noscript"]
+        [
+            "script",
+            "style",
+            "noscript",
+        ]
     ):
         tag.decompose()
 
     main = (
-        soup.select_one("article")
-        or soup.select_one(".entry-content")
-        or soup.select_one("main")
+        soup.select_one(
+            "article"
+        )
+        or soup.select_one(
+            ".entry-content"
+        )
+        or soup.select_one(
+            "main"
+        )
         or soup.body
     )
 
@@ -805,7 +1293,9 @@ def body_text(
     )
 
 
-def extract_season(text: str) -> Optional[int]:
+def extract_season(
+    text: str,
+) -> Optional[int]:
 
     patterns = [
         r"\bseason\s*(\d+)\b",
@@ -821,8 +1311,12 @@ def extract_season(text: str) -> Optional[int]:
         )
 
         if match:
+
             try:
-                return int(match.group(1))
+                return int(
+                    match.group(1)
+                )
+
             except ValueError:
                 pass
 
@@ -850,147 +1344,134 @@ def extract_episode_numbers(
         ):
 
             try:
+
                 number = int(
                     match.group(1)
                 )
 
-                if 0 < number <= 5000:
-                    numbers.append(number)
+                if (
+                    0
+                    < number
+                    <= 5000
+                ):
+                    numbers.append(
+                        number
+                    )
 
             except ValueError:
                 continue
 
-    return sorted(set(numbers))
+    return sorted(
+        set(numbers)
+    )
 
 
-def extract_total_episode(
+def extract_total_episodes(
     text: str,
 ) -> Optional[int]:
 
     patterns = [
+        r"\b(\d{1,4})\s*episodes?\b",
         r"\btotal\s*episodes?\s*[:\-]?\s*(\d{1,4})\b",
         r"\bepisodes?\s*[:\-]?\s*(\d{1,4})\b",
-        r"\b(\d{1,4})\s*episodes?\b",
     ]
+
+    values = []
 
     for pattern in patterns:
 
-        match = re.search(
+        for match in re.finditer(
             pattern,
             text,
             re.IGNORECASE,
-        )
-
-        if match:
+        ):
 
             try:
-                number = int(
+
+                value = int(
                     match.group(1)
                 )
 
-                if 0 < number <= 5000:
-                    return number
+                if (
+                    0
+                    < value
+                    <= 5000
+                ):
+                    values.append(
+                        value
+                    )
 
             except ValueError:
-                pass
+                continue
 
-    return None
+    if not values:
+        return None
+
+    return max(values)
 
 
 def extract_languages(
     text: str,
 ) -> List[str]:
 
-    lower = text.lower()
-
     found = []
-
-    language_patterns = {
-        "Hindi": [
-            r"\bhindi\b",
-            r"\bहिंदी\b",
-        ],
-        "English": [
-            r"\benglish\b",
-        ],
-        "Tamil": [
-            r"\btamil\b",
-            r"\bதமிழ்\b",
-        ],
-        "Telugu": [
-            r"\btelugu\b",
-            r"\bతెలుగు\b",
-        ],
-        "Japanese": [
-            r"\bjapanese\b",
-            r"\b日本語\b",
-        ],
-    }
 
     for language in DISPLAY_LANGUAGES:
 
-        patterns = language_patterns.get(
-            language,
-            [],
-        )
+        if re.search(
+            rf"\b{re.escape(language)}\b",
+            text,
+            re.IGNORECASE,
+        ):
 
-        for pattern in patterns:
-
-            if re.search(
-                pattern,
-                lower,
-                re.IGNORECASE,
-            ):
-                found.append(language)
-                break
+            found.append(
+                language
+            )
 
     return found
 
+
 # ============================================================
-# PLATFORM / NETWORK
+# PLATFORM DETECTION
 # ============================================================
 
 PLATFORM_PATTERNS = {
-    "Sony YAY!": [
-        r"sony\s*yay",
-        r"sony\s*yay!",
-    ],
-    "SonyLIV": [
-        r"sonyliv",
-        r"sony\s*liv",
-    ],
     "Crunchyroll": [
-        r"crunchyroll",
+        r"\bcrunchyroll\b",
     ],
     "Netflix": [
         r"\bnetflix\b",
     ],
+    "Sony YAY!": [
+        r"\bsony\s*yay\b",
+        r"\bsony\s*yay!\b",
+    ],
+    "SonyLIV": [
+        r"\bsonyliv\b",
+    ],
     "JioHotstar": [
-        r"jiohotstar",
-        r"hotstar",
-        r"jiocinema",
-        r"jio\s*cinema",
+        r"\bjiohotstar\b",
+        r"\bhotstar\b",
     ],
     "Amazon MX Player": [
-        r"amazon\s*mx\s*player",
         r"\bmx\s*player\b",
+        r"\bamazon\s*mx\s*player\b",
     ],
     "Prime Video": [
-        r"prime\s*video",
-        r"amazon\s*prime",
+        r"\bprime\s*video\b",
     ],
     "Anime Times": [
-        r"anime\s*times",
+        r"\banime\s*times\b",
     ],
     "ZEE5": [
         r"\bzee5\b",
     ],
     "Muse India": [
-        r"muse\s*india",
+        r"\bmuse\s*india\b",
     ],
     "Ani-One India": [
-        r"ani[-\s]*one\s*india",
-        r"anione\s*india",
+        r"\bani[\-\s]?one\s*india\b",
+        r"\banione\s*india\b",
     ],
 }
 
@@ -1001,7 +1482,9 @@ def extract_platforms(
 
     found = []
 
-    for platform, patterns in PLATFORM_PATTERNS.items():
+    for platform, patterns in (
+        PLATFORM_PATTERNS.items()
+    ):
 
         for pattern in patterns:
 
@@ -1010,70 +1493,66 @@ def extract_platforms(
                 text,
                 re.IGNORECASE,
             ):
-                found.append(platform)
+
+                found.append(
+                    platform
+                )
+
                 break
 
     return found
 
-
 # ============================================================
-# HINDI DUB
+# HINDI DUB DETECTION
 # ============================================================
 
 def detect_hindi_dub(
-    title: str,
     text: str,
-) -> Tuple[bool, bool]:
+) -> tuple[bool, bool]:
 
-    combined = f"{title} {text}".lower()
+    lower = text.lower()
 
     positive_patterns = [
-        r"hindi\s*dub",
-        r"hindi\s*dubbed",
-        r"hindi\s*audio",
-        r"hindi\s*language",
-        r"audio\s*[:\-]\s*.*hindi",
-        r"languages?\s*[:\-]\s*.*hindi",
+        r"\bhindi\s*dub\b",
+        r"\bhindi\s*dubbed\b",
+        r"\bhindi\s*audio\b",
+        r"\bhindi\s*language\b",
+        r"\blanguage\s*[:\-]?\s*hindi\b",
+        r"\bhindi\s*version\b",
     ]
 
     negative_patterns = [
-        r"hindi\s*sub",
-        r"hindi\s*subtitle",
-        r"subbed\s*only",
+        r"\bnot\s*available\s*in\s*hindi\b",
+        r"\bhindi\s*not\s*available\b",
+        r"\bno\s*hindi\s*dub\b",
     ]
 
-    positive = any(
-        re.search(
+    for pattern in negative_patterns:
+
+        if re.search(
             pattern,
-            combined,
+            lower,
             re.IGNORECASE,
-        )
-        for pattern in positive_patterns
-    )
+        ):
+            return False, True
 
-    negative = any(
-             re.search(
+    for pattern in positive_patterns:
+
+        if re.search(
             pattern,
-            combined,
+            lower,
             re.IGNORECASE,
-        )
-        for pattern in negative_patterns
-    )
+        ):
+            return True, True
 
-    if positive:
-        return True, True
-
-    # If page is explicitly inside Hindi Dub category
-    # or title says Hindi Dubbed.
-    if (
-        "hindi-dubbed" in combined
-        or "hindi dub" in combined
+    # A standalone Hindi language mention is weaker,
+    # but useful on RareAnimes metadata pages.
+    if re.search(
+        r"\bhindi\b",
+        lower,
+        re.IGNORECASE,
     ):
         return True, True
-
-    # Do not treat "Hindi Sub" as Hindi Dub.
-    if negative and not positive:
-        return False, True
 
     return False, False
 
@@ -1082,12 +1561,6 @@ def detect_hindi_dub(
 # CURRENT AIRING SCHEDULE FALLBACKS
 # ============================================================
 
-# RareAnimes can list only the Hindi-dubbed episodes currently
-# uploaded on its page.  That number must NOT be treated as the
-# total episode count of a currently-airing Japanese broadcast.
-# These schedule rules are metadata-only and are used to correct
-# the current-airing episode/status when the source page exposes
-# only the dubbed batch.
 CURRENT_AIRING_SCHEDULES = {
     "black torch": {
         "total_episodes": 12,
@@ -1098,89 +1571,127 @@ CURRENT_AIRING_SCHEDULES = {
 }
 
 
-def _schedule_key(value: str) -> str:
-    value = clean_text(value).lower()
-    value = re.sub(r"season\s*\d+", "", value)
-    value = re.sub(r"[^a-z0-9]+", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
+def _schedule_key(
+    value: str,
+) -> str:
+
+    return compact_normalize(
+        value
+    )
 
 
 def apply_current_schedule(
     info: AnimeInfo,
 ) -> AnimeInfo:
-    """Correct current-airing metadata when the source only lists dubbed episodes."""
+    """
+    Apply known current airing data.
 
-    candidates = [
-        info.name or "",
-        info.original_name or "",
-        info.matched_title or "",
-    ]
+    This prevents a Hindi upload count from being
+    incorrectly treated as the total series episode count.
+    """
 
-    rule = None
-    for candidate in candidates:
-        key = _schedule_key(candidate)
-        for known_name, known_rule in CURRENT_AIRING_SCHEDULES.items():
-            if known_name in key:
-                rule = known_rule
-                break
-        if rule:
-            break
+    key = _schedule_key(
+        info.name
+    )
 
-    if not rule:
+    data = CURRENT_AIRING_SCHEDULES.get(
+        key
+    )
+
+    if not data:
         return info
 
     try:
+
         start = datetime.strptime(
-            rule["start_date"],
+            data["start_date"],
             "%Y-%m-%d",
         ).date()
 
         today = datetime.now().date()
-        total = int(rule["total_episodes"])
 
-        if today < start:
-            return info
+        elapsed_days = (
+            today - start
+        ).days
 
-        elapsed_weeks = (today - start).days // 7
-        current = min(
-            elapsed_weeks + 1,
-            total,
+        if elapsed_days < 0:
+            current_episode = 0
+        else:
+            current_episode = (
+                elapsed_days // 7
+            ) + 1
+
+        total = int(
+            data[
+                "total_episodes"
+            ]
+        )
+
+        current_episode = max(
+            1,
+            min(
+                current_episode,
+                total,
+            ),
+        )
+
+        last_date = (
+            start
+            + timedelta(
+                weeks=current_episode - 1
+            )
         )
 
         info.total_episodes = total
-        info.last_episode = current
-        info.episodes = current
-        info.schedule = rule["schedule"]
-
-        last_date = start + timedelta(weeks=current - 1)
-        info.last_release = last_date.strftime(
-            "%d %B %Y"
+        info.last_episode = (
+            current_episode
         )
 
-        if current < total:
-            info.status = "Ongoing"
-            info.next_episode = current + 1
-
-            next_date = start + timedelta(
-                weeks=current
-            )
-            info.expected_release = next_date.strftime(
+        info.last_release = (
+            last_date.strftime(
                 "%d %B %Y"
             )
+        )
+
+        info.schedule = data[
+            "schedule"
+        ]
+
+        if current_episode < total:
+
+            info.status = "Ongoing"
+
+            info.next_episode = (
+                current_episode + 1
+            )
+
+            next_date = (
+                last_date
+                + timedelta(
+                    weeks=1
+                )
+            )
+
+            info.expected_release = (
+                next_date.strftime(
+                    "%d %B %Y"
+                )
+            )
+
         else:
+
             info.status = "Completed"
             info.next_episode = None
             info.expected_release = None
 
     except Exception:
-        # Never break normal scraping because of a schedule rule.
-        return info
+        pass
 
     return info
 
 
 # ============================================================
-# STATUS
+# STATUS DETECTION
 # ============================================================
 
 def detect_status(
@@ -1191,47 +1702,48 @@ def detect_status(
 
     lower = text.lower()
 
-    completed_words = [
-        "completed",
-        "complete",
-        "series completed",
-        "all episodes",
+    ongoing_patterns = [
+        r"\bongoing\b",
+        r"\bcurrently\s*airing\b",
+        r"\bairing\b",
+        r"\bstill\s*airing\b",
+        r"\bweekly\b",
     ]
 
-    ongoing_words = [
-        "ongoing",
-        "currently airing",
-        "airing",
-        "currently releasing",
-        "episode added",
-        "new episode",
+    completed_patterns = [
+        r"\bcompleted\b",
+        r"\bcomplete\b",
+        r"\bfinished\b",
     ]
 
-    if any(
-        word in lower
-        for word in completed_words
-    ):
-        return "Completed"
+    for pattern in ongoing_patterns:
 
-    if any(
-        word in lower
-        for word in ongoing_words
-    ):
-        return "Ongoing"
+        if re.search(
+            pattern,
+            lower,
+            re.IGNORECASE,
+        ):
+            return "Ongoing"
+
+    for pattern in completed_patterns:
+
+        if re.search(
+            pattern,
+            lower,
+            re.IGNORECASE,
+        ):
+            return "Completed"
 
     if (
-        current_episode
-        and total_episode
-        and current_episode < total_episode
+        current_episode is not None
+        and total_episode is not None
     ):
-        return "Ongoing"
 
-    if (
-        current_episode
-        and total_episode
-        and current_episode >= total_episode
-    ):
-        return "Completed"
+        if current_episode < total_episode:
+            return "Ongoing"
+
+        if current_episode >= total_episode:
+            return "Completed"
 
     return "Unknown"
 
@@ -1246,11 +1758,9 @@ MONTHS = (
 )
 
 
-def normalize_date_string(
-    value: str,
-) -> Optional[str]:
-
-    value = clean_text(value)
+def extract_dates(
+    text: str,
+) -> List[str]:
 
     patterns = [
         rf"\b\d{{1,2}}\s+(?:{MONTHS})\s+\d{{4}}\b",
@@ -1258,63 +1768,36 @@ def normalize_date_string(
         r"\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b",
     ]
 
-    for pattern in patterns:
-
-        match = re.search(
-            pattern,
-            value,
-            re.IGNORECASE,
-        )
-
-        if match:
-            return match.group(0)
-
-    return None
-
-
-def extract_last_release(
-    text: str,
-) -> Optional[str]:
-
-    patterns = [
-        r"(?:last\s*release|released\s*on|release\s*date)"
-        r"\s*[:\-]?\s*([^|.;]{6,40})",
-
-        r"(?:released)\s*[:\-]?\s*([^|.;]{6,40})",
-    ]
+    found = []
 
     for pattern in patterns:
 
-        match = re.search(
+        for match in re.finditer(
             pattern,
             text,
             re.IGNORECASE,
-        )
+        ):
 
-        if match:
-
-            result = normalize_date_string(
-                match.group(1)
+            value = clean_text(
+                match.group(0)
             )
 
-            if result:
-                return result
+            if value not in found:
+                found.append(
+                    value
+                )
 
-    return None
+    return found
 
-
-# ============================================================
-# LAST / NEXT EPISODE
-# ============================================================
 
 def extract_last_episode(
     text: str,
 ) -> Optional[int]:
 
     patterns = [
-        r"last\s*episode\s*[:\-]?\s*(\d{1,4})",
-        r"latest\s*episode\s*[:\-]?\s*(\d{1,4})",
-        r"episode\s*(\d{1,4})\s*(?:added|released)",
+        r"\blast\s+episode\s*[:\-]?\s*(\d{1,4})\b",
+        r"\blatest\s+episode\s*[:\-]?\s*(\d{1,4})\b",
+        r"\bepisode\s*(\d{1,4})\s*(?:released|aired)\b",
     ]
 
     for pattern in patterns:
@@ -1328,20 +1811,20 @@ def extract_last_episode(
         if match:
 
             try:
-                number = int(
+                return int(
                     match.group(1)
                 )
-
-                if 0 < number <= 5000:
-                    return number
-
             except ValueError:
                 pass
 
-    episodes = extract_episode_numbers(text)
+    numbers = extract_episode_numbers(
+        text
+    )
 
-    if episodes:
-        return max(episodes)
+    if numbers:
+        return max(
+            numbers
+        )
 
     return None
 
@@ -1351,9 +1834,9 @@ def extract_next_episode(
 ) -> Optional[int]:
 
     patterns = [
-        r"next\s*episode\s*[:\-]?\s*(\d{1,4})",
-        r"upcoming\s*episode\s*[:\-]?\s*(\d{1,4})",
-        r"episode\s*(\d{1,4})\s*(?:next|upcoming)",
+        r"\bnext\s+episode\s*[:\-]?\s*(\d{1,4})\b",
+        r"\bupcoming\s+episode\s*[:\-]?\s*(\d{1,4})\b",
+        r"\bepisode\s*(\d{1,4})\s*(?:next|upcoming)\b",
     ]
 
     for pattern in patterns:
@@ -1367,64 +1850,25 @@ def extract_next_episode(
         if match:
 
             try:
-                number = int(
+                return int(
                     match.group(1)
                 )
-
-                if 0 < number <= 5000:
-                    return number
-
             except ValueError:
                 pass
 
     return None
 
 
-def extract_expected_release(
+def extract_last_release(
     text: str,
 ) -> Optional[str]:
 
     patterns = [
-        r"(?:expected\s*release|next\s*release|"
-        r"airing\s*on|releasing\s*on)"
-        r"\s*[:\-]?\s*([^|.;]{6,45})",
+        rf"(?:last|latest|released|release|aired|airdate)"
+        rf"[^.{{0,100}}]{{0,100}}"
+        rf"(\d{{1,2}}\s+(?:{MONTHS})\s+\d{{4}})",
 
-        r"(?:next\s*episode.*?)(\d{1,2}\s+"
-        rf"(?:{MONTHS})\s+\d{{4}})",
-    ]
-
-    for pattern in patterns:
-
-        match = re.search(
-            pattern,
-            text,
-            re.IGNORECASE,
-        )
-
-        if match:
-
-            result = normalize_date_string(
-                            match.group(1)
-            )
-
-            if result:
-                return result
-
-    return None
-
-
-def extract_schedule(
-    text: str,
-) -> Optional[str]:
-
-    patterns = [
-        r"(every\s+(?:monday|tuesday|wednesday|thursday|"
-        r"friday|saturday|sunday))",
-
-        r"(weekly\s+on\s+(?:monday|tuesday|wednesday|"
-        r"thursday|friday|saturday|sunday))",
-
-        r"(every\s+week)",
+        rf"(\d{{1,2}}\s+(?:{MONTHS})\s+\d{{4}})",
     ]
 
     for pattern in patterns:
@@ -1438,26 +1882,111 @@ def extract_schedule(
         if match:
             return clean_text(
                 match.group(1)
-            ).title()
+            )
+
+    dates = extract_dates(
+        text
+    )
+
+    if dates:
+        return dates[-1]
 
     return None
 
-# ============================================================
-# EXTRA FIELD EXTRACTION
-# ============================================================
 
-def extract_label_value(
+def extract_expected_release(
     text: str,
-    labels: List[str],
 ) -> Optional[str]:
 
-    for label in labels:
+    patterns = [
+        rf"(?:expected|next|upcoming)"
+        rf"[^.{{0,100}}]{{0,100}}"
+        rf"(\d{{1,2}}\s+(?:{MONTHS})\s+\d{{4}})",
 
-        pattern = (
-            rf"{re.escape(label)}"
-            rf"\s*[:\-]\s*"
-            rf"([^|•\n;]{{2,100}})"
+        rf"(?:next\s+episode|episode\s+\d+)"
+        rf"[^.{{0,100}}]{{0,100}}"
+        rf"(\d{{1,2}}\s+(?:{MONTHS})\s+\d{{4}})",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
         )
+
+        if match:
+
+            return clean_text(
+                match.group(1)
+            )
+
+    return None
+
+
+# ============================================================
+# SCHEDULE
+# ============================================================
+
+def extract_schedule(
+    text: str,
+) -> Optional[str]:
+
+    patterns = [
+        (
+            r"\bevery\s+"
+            r"(monday|tuesday|wednesday|thursday|friday|"
+            r"saturday|sunday)\b",
+            lambda m:
+                "Every "
+                + m.group(1).capitalize(),
+        ),
+
+        (
+            r"\bweekly\b",
+            lambda m: "Weekly",
+        ),
+
+        (
+            r"\b(monday|tuesday|wednesday|thursday|friday|"
+            r"saturday|sunday)\s+release\b",
+            lambda m:
+                "Every "
+                + m.group(1).capitalize(),
+        ),
+    ]
+
+    for pattern, formatter in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+            return formatter(
+                match
+            )
+
+    return None
+
+
+# ============================================================
+# STUDIO / DUB BY
+# ============================================================
+
+def extract_studio(
+    text: str,
+) -> Optional[str]:
+
+    patterns = [
+        r"\bstudio\s*[:\-]\s*([^|•]+)",
+        r"\bstudios?\s*[:\-]\s*([^|•]+)",
+    ]
+
+    for pattern in patterns:
 
         match = re.search(
             pattern,
@@ -1472,37 +2001,38 @@ def extract_label_value(
             )
 
             if value:
-                return value
+                return value[:120]
 
     return None
-
-
-def extract_studio(
-    text: str,
-) -> Optional[str]:
-
-    return extract_label_value(
-        text,
-        [
-            "Studio",
-            "Studios",
-        ],
-    )
 
 
 def extract_dub_by(
     text: str,
 ) -> Optional[str]:
 
-    return extract_label_value(
-        text,
-        [
-            "Dub By",
-            "Dubbed By",
-            "Hindi Dub By",
-            "Hindi Dubbed By",
-        ],
-    )
+    patterns = [
+        r"\bdub(?:bed)?\s*by\s*[:\-]?\s*([^|•]+)",
+        r"\bdub\s*by\s*[:\-]\s*([^|•]+)",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+
+            value = clean_text(
+                match.group(1)
+            )
+
+            if value:
+                return value[:120]
+
+    return None
 
 
 # ============================================================
@@ -1511,14 +2041,30 @@ def extract_dub_by(
 
 def discover_season_links(
     soup: BeautifulSoup,
-    anime_name: str,
-) -> List[Tuple[int, str]]:
+) -> List[str]:
 
-    results: Dict[int, str] = {}
+    links = []
 
-    for anchor in soup.find_all("a"):
+    season_pattern = re.compile(
+        r"\bseason\s*\d+\b"
+        r"|\bs\d{1,2}\b",
+        re.IGNORECASE,
+    )
 
-        href = anchor.get("href")
+    for anchor in soup.find_all(
+        "a"
+    ):
+
+        href = anchor.get(
+            "href"
+        )
+
+        title = clean_text(
+            anchor.get_text(
+                " ",
+                strip=True,
+            )
+        )
 
         if not href:
             continue
@@ -1528,238 +2074,213 @@ def discover_season_links(
             href,
         )
 
-        href = safe_page_url(href)
+        href = safe_page_url(
+            href
+        )
 
         if not href:
             continue
 
-        title = clean_text(
-            anchor.get_text(
-                " ",
-                strip=True,
-            )
-        )
+        if season_pattern.search(
+            title
+        ):
 
-        combined = f"{title} {href}"
+            if href not in links:
+                links.append(
+                    href
+                )
 
-        season = extract_season(
-            combined
-        )
-
-        if season is None:
-            continue
-
-        # Keep only links that resemble the same anime.
-        score = similarity(
-            anime_name,
-            title,
-        )
-
-        url_score = similarity(
-            anime_name,
-            href.replace("-", " "),
-        )
-
-        if max(score, url_score) < 0.30:
-            continue
-
-        results[season] = href
-
-    return sorted(
-        results.items(),
-        key=lambda item: item[0],
-    )
-
+    return links
 
 # ============================================================
-# PAGE -> ANIME INFO
+# ANIME PAGE PARSER
 # ============================================================
 
 def parse_anime_page(
     url: str,
-    query: str = "",
+    fallback_name: str = "",
 ) -> Optional[AnimeInfo]:
 
-    url = safe_page_url(url)
+    url = safe_page_url(
+        url
+    )
 
     if not url:
         return None
 
-    html_text = fetch(url)
+    html = fetch(
+        url,
+        timeout=REQUEST_TIMEOUT,
+    )
 
-    if not html_text:
+    if not html:
         return None
 
     soup = BeautifulSoup(
-        html_text,
+        html,
         "html.parser",
     )
 
-    title = page_title(soup)
+    title = page_title(
+        soup
+    )
 
     if not title:
+        title = fallback_name
+
+    text = body_text(
+        soup
+    )
+
+    if not text:
         return None
 
-    text = body_text(soup)
-
     season = extract_season(
-        f"{title} {text}"
+        title + " " + text
     )
 
-    episodes_found = extract_episode_numbers(
-        text
+    episode_numbers = (
+        extract_episode_numbers(
+            text
+        )
     )
 
-    total_episodes = extract_total_episode(
-        text
+    total_episodes = (
+        extract_total_episodes(
+            text
+        )
     )
 
-    last_episode = extract_last_episode(
-        text
-    )
+    if episode_numbers:
 
-    # If the page clearly lists episode numbers,
-    # use the highest number.
-    if episodes_found:
-
-        highest = max(
-            episodes_found
+        current_episode = max(
+            episode_numbers
         )
 
-        if not last_episode:
-            last_episode = highest
+    else:
 
-        if not total_episodes:
-            total_episodes = highest
-
-    next_episode = extract_next_episode(
-        text
-    )
-
-    hindi_dub, hindi_known = detect_hindi_dub(
-        title,
-        text,
-    )
+        current_episode = None
 
     languages = extract_languages(
-        f"{title} {text}"
+        text
     )
 
     platforms = extract_platforms(
-        f"{title} {text}"
+        text
+    )
+
+    hindi_dub, hindi_known = (
+        detect_hindi_dub(
+            title + " " + text
+        )
     )
 
     status = detect_status(
-        text,
-        last_episode,
+        title + " " + text,
+        current_episode,
         total_episodes,
     )
 
-    # If there is no explicit status but next episode
-    # exists, consider it ongoing.
-    if (
-        status == "Unknown"
-        and next_episode is not None
-    ):
-        status = "Ongoing"
-
-    # If current >= total, completed.
-    if (
-        last_episode
-        and total_episodes
-        and last_episode >= total_episodes
-    ):
-        status = "Completed"
-
-    info = AnimeInfo()
-
-    info.name = clean_text(title)
-    info.original_name = clean_text(title)
-
-    # RareAnimes page titles contain upload-page wording.
-    # Keep the actual anime title for known schedule rules.
-if "black torch" in _schedule_key(title):
-        info.name = "BLACK TORCH"
-        info.original_name = "BLACK TORCH"
-
-    info.poster = extract_poster(soup)
-
-    info.hindi_dub = hindi_dub
-    info.hindi_status_known = hindi_known
-
-    info.platform = platforms
-
-    info.season = season
-
-    if season is not None:
-        info.seasons = [season]
-
-    info.episodes = last_episode
-    info.total_episodes = total_episodes
-
-    info.languages = languages
-
-    info.status = status
-
-    info.last_episode = last_episode
-    info.last_release = extract_last_release(
-        text
-    )
-
-    info.next_episode = next_episode
-    info.expected_release = extract_expected_release(
-        text
-    )
-    info.schedule = extract_schedule(
-        text
-    )
-
-    info.studio = extract_studio(
-        text
-    )
-
-    info.dub_by = extract_dub_by(
-        text
-    )
-
-    info.source = "DC"
-    info.source_url = url
-
-    info.matched_title = title
-
-    info.confidence = similarity(
-        query,
-        title,
-    )
-
-    # Discover other season pages.
-    season_links = discover_season_links(
-        soup,
-        title,
-    )
-
-    info.season_pages = [
-        season_url
-        for _, season_url in season_links
-    ]
-
-    info.seasons = sorted(
-        set(
-            [x for x in info.seasons]
-            + [season_no for season_no, _ in season_links]
+    last_episode = (
+        extract_last_episode(
+            text
         )
+    )
+
+    if last_episode is None:
+        last_episode = current_episode
+
+    last_release = (
+        extract_last_release(
+            text
+        )
+    )
+
+    next_episode = (
+        extract_next_episode(
+            text
+        )
+    )
+
+    expected_release = (
+        extract_expected_release(
+            text
+        )
+    )
+
+    schedule = extract_schedule(
+        text
+    )
+
+    studio = extract_studio(
+        text
+    )
+
+    dub_by = extract_dub_by(
+        text
+    )
+
+    poster = extract_poster(
+        soup
+    )
+
+    season_pages = (
+        discover_season_links(
+            soup
+        )
+    )
+
+    info = AnimeInfo(
+        name=title,
+        original_name=title,
+        poster=poster,
+        hindi_dub=hindi_dub,
+        hindi_status_known=hindi_known,
+        platform=platforms,
+        season=season,
+        seasons=(
+            [season]
+            if season is not None
+            else []
+        ),
+        episodes=current_episode,
+        total_episodes=total_episodes,
+        languages=languages,
+        status=status,
+        last_episode=last_episode,
+        last_release=last_release,
+        next_episode=next_episode,
+        expected_release=expected_release,
+        schedule=schedule,
+        studio=studio,
+        dub_by=dub_by,
+        source=SOURCE_NAME,
+        source_url=url,
+        matched_title=title,
+        confidence=similarity(
+            fallback_name,
+            title,
+        )
+        if fallback_name
+        else 1.0,
+        season_pages=season_pages,
     )
 
     return info
 
 
 # ============================================================
-# BEST MATCH
+# BEST SEARCH RESULT
 # ============================================================
+
 def choose_best_result(
     query: str,
-    results: List[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
+    results: List[
+        Dict[str, Any]
+    ],
+) -> Optional[
+    Dict[str, Any]
+]:
 
     if not results:
         return None
@@ -1771,10 +2292,17 @@ def choose_best_result(
     best_item = None
     best_score = -1.0
 
+    qlower = query.lower()
+
     for item in results:
 
         title = item.get(
             "title",
+            "",
+        )
+
+        url = item.get(
+            "url",
             "",
         )
 
@@ -1783,7 +2311,22 @@ def choose_best_result(
             title,
         )
 
+        # URL slug gets a strong weight for pages such as:
+        # konosuba-season-1-hindi-dubbed...
+        slug_score = similarity(
+            query,
+            slug_from_url(
+                url
+            ),
+        )
+
+        score = max(
+            score,
+            slug_score * 0.98,
+        )
+
         if canonical:
+
             alias_score = similarity(
                 canonical,
                 title,
@@ -1794,24 +2337,107 @@ def choose_best_result(
                 alias_score,
             )
 
-        # Penalize obvious movie results when
-        # the user did not ask for a movie.
-        qlower = query.lower()
         tlower = title.lower()
 
-        if "movie" in tlower and "movie" not in qlower:
+        # Don't select a movie when user asked for normal anime.
+        if (
+            "movie" in tlower
+            and "movie" not in qlower
+        ):
             score -= 0.12
 
+        # Don't select obvious irrelevant content.
+        bad_terms = [
+            "request",
+            "privacy policy",
+            "contact us",
+            "telegram",
+            "advertisement",
+        ]
+
+        if any(
+            term in tlower
+            for term in bad_terms
+        ):
+            score -= 0.30
+
         if score > best_score:
+
             best_score = score
-            best_item = dict(item)
-            best_item["score"] = score
+
+            best_item = dict(
+                item
+            )
+
+            best_item[
+                "score"
+            ] = score
 
     if not best_item:
         return None
 
-    # Require a reasonable match.
-    if best_item["score"] < 0.42:
+    # Exact/compact/containment matches are accepted.
+    qnorm = normalize_text(
+        query
+    )
+
+    qcompact = compact_normalize(
+        query
+    )
+
+    tnorm = normalize_text(
+        best_item.get(
+            "title",
+            "",
+        )
+    )
+
+    tcompact = compact_normalize(
+        best_item.get(
+            "title",
+            "",
+        )
+    )
+
+    slug = compact_normalize(
+        slug_from_url(
+            best_item.get(
+                "url",
+                "",
+            )
+        )
+    )
+
+    exactish = (
+        qnorm == tnorm
+        or qcompact == tcompact
+        or (
+            qcompact
+            and qcompact in tcompact
+        )
+        or (
+            tcompact
+            and tcompact in qcompact
+        )
+        or (
+            qcompact
+            and qcompact in slug
+        )
+    )
+
+    # Short names can score lower because the page title
+    # contains season/dub/upload metadata.
+    if len(qcompact) <= 12:
+        threshold = 0.30
+    else:
+        threshold = 0.36
+
+    if (
+        not exactish
+        and best_item[
+            "score"
+        ] < threshold
+    ):
         return None
 
     return best_item
@@ -1831,29 +2457,29 @@ def merge_season_info(
         main_info.seasons = sorted(
             set(
                 main_info.seasons
-                + [season_info.season]
+                + [
+                    season_info.season
+                ]
             )
         )
 
-    # Keep useful languages.
     main_info.languages = sorted(
         set(
             main_info.languages
             + season_info.languages
         ),
-        key=lambda x: DISPLAY_LANGUAGES.index(x)
-        if x in DISPLAY_LANGUAGES
-        else 99,
+        key=lambda x:
+            DISPLAY_LANGUAGES.index(x)
+            if x in DISPLAY_LANGUAGES
+            else 99,
     )
 
-    # Hindi status.
     if season_info.hindi_status_known:
         main_info.hindi_status_known = True
 
     if season_info.hindi_dub:
         main_info.hindi_dub = True
 
-    # Platforms.
     main_info.platform = sorted(
         set(
             main_info.platform
@@ -1861,12 +2487,15 @@ def merge_season_info(
         )
     )
 
-    # Studio / dub-by.
     if not main_info.studio:
-        main_info.studio = season_info.studio
+        main_info.studio = (
+            season_info.studio
+        )
 
     if not main_info.dub_by:
-        main_info.dub_by = season_info.dub_by
+        main_info.dub_by = (
+            season_info.dub_by
+        )
 
 
 # ============================================================
@@ -1886,16 +2515,24 @@ def load_additional_seasons(
     if not urls:
         return info
 
-    urls = urls[:MAX_SEASON_PAGES]
+    urls = urls[
+        :MAX_SEASON_PAGES
+    ]
 
-    def worker(url: str):
+    def worker(
+        url: str,
+    ):
+
         return parse_anime_page(
             url,
             info.name,
         )
 
     with ThreadPoolExecutor(
-        max_workers=min(6, len(urls))
+        max_workers=min(
+            6,
+            len(urls),
+        )
     ) as executor:
 
         futures = [
@@ -1906,10 +2543,15 @@ def load_additional_seasons(
             for url in urls
         ]
 
-        for future in as_completed(futures):
+        for future in as_completed(
+            futures
+        ):
 
             try:
-                season_info = future.result()
+
+                season_info = (
+                    future.result()
+                )
 
             except Exception:
                 continue
@@ -1924,6 +2566,7 @@ def load_additional_seasons(
 
     return info
 
+
 # ============================================================
 # FINAL CLEANUP
 # ============================================================
@@ -1932,14 +2575,12 @@ def finalize_info(
     info: AnimeInfo,
 ) -> AnimeInfo:
 
-    # Remove duplicate platforms.
     info.platform = list(
         dict.fromkeys(
             info.platform
         )
     )
 
-    # Only requested languages.
     filtered_languages = []
 
     for language in DISPLAY_LANGUAGES:
@@ -1949,81 +2590,137 @@ def finalize_info(
                 language
             )
 
-    info.languages = filtered_languages
+    info.languages = (
+        filtered_languages
+    )
 
-    # If Hindi is known to be available,
-    # make sure Hindi appears.
     if info.hindi_dub:
-        if "Hindi" not in info.languages:
+
+        if (
+            "Hindi"
+            not in info.languages
+        ):
+
             info.languages.insert(
                 0,
                 "Hindi",
             )
 
-    # If episodes are known but total is not,
-    # use current number as total only when completed.
     if (
         info.episodes is not None
         and info.total_episodes is None
         and info.status == "Completed"
     ):
-        info.total_episodes = info.episodes
 
-    # Current episode should normally be last episode.
+        info.total_episodes = (
+            info.episodes
+        )
+
     if info.last_episode is None:
-        info.last_episode = info.episodes
 
-    # For ongoing anime, if total is unknown,
-    # don't fabricate "10 / 12".
+        info.last_episode = (
+            info.episodes
+        )
+
     if info.status == "Ongoing":
-        if info.total_episodes is not None:
-            info.episodes = info.last_episode
-        else:
-            info.episodes = info.last_episode
 
-    # Completed.
+        info.episodes = (
+            info.last_episode
+        )
+
     if (
         info.status == "Completed"
         and info.last_episode is not None
     ):
-        info.episodes = info.last_episode
+
+        info.episodes = (
+            info.last_episode
+        )
+
+        if info.total_episodes is None:
+
+            info.total_episodes = (
+                info.last_episode
+            )
 
     return info
 
 
-
 # ============================================================
-# FAST IN-MEMORY CACHE
+# CACHE
 # ============================================================
 
-_INFO_CACHE = {}
-_INFO_CACHE_TTL = 600  # 10 minutes
+_INFO_CACHE: Dict[
+    str,
+    tuple[
+        float,
+        AnimeInfo,
+    ]
+] = {}
 
-def _cache_key(query: str) -> str:
-    return re.sub(r"\s+", " ", clean_text(query).lower()).strip()
+_INFO_CACHE_TTL = 600
 
-def _get_cached_info(query: str):
-    key = _cache_key(query)
-    item = _INFO_CACHE.get(key)
+
+def _cache_key(
+    query: str,
+) -> str:
+
+    return compact_normalize(
+        query
+    )
+
+
+def _get_cached_info(
+    query: str,
+) -> Optional[AnimeInfo]:
+
+    key = _cache_key(
+        query
+    )
+
+    item = _INFO_CACHE.get(
+        key
+    )
+
     if not item:
         return None
-    saved_at, info = item
-    if time.time() - saved_at > _INFO_CACHE_TTL:
-        _INFO_CACHE.pop(key, None)
+
+    timestamp, info = item
+
+    if (
+        time.time()
+        - timestamp
+        > _INFO_CACHE_TTL
+    ):
+
+        _INFO_CACHE.pop(
+            key,
+            None,
+        )
+
         return None
+
     return info
 
-def _set_cached_info(query: str, info):
-    key = _cache_key(query)
-    _INFO_CACHE[key] = (time.time(), info)
-    # Keep memory bounded.
-    if len(_INFO_CACHE) > 100:
-        oldest = min(_INFO_CACHE, key=lambda k: _INFO_CACHE[k][0])
-        _INFO_CACHE.pop(oldest, None)
 
+def _set_cached_info(
+    query: str,
+    info: AnimeInfo,
+) -> None:
+
+    key = _cache_key(
+        query
+    )
+
+    _INFO_CACHE[
+        key
+    ] = (
+        time.time(),
+        info,
+    )
 
 # ============================================================
-# MAIN SCRAPER FUNCTION
+# MAIN API
 # ============================================================
 
 def get_anime_info(
@@ -2031,42 +2728,33 @@ def get_anime_info(
     load_seasons: bool = False,
 ) -> Optional[AnimeInfo]:
     """
-    Fast main scraper.
+    Main anime lookup.
 
-    Default behavior intentionally does NOT load additional season pages.
-    The main RareAnimes page is parsed first so normal searches are much faster.
-    Results are cached for 10 minutes.
+    Fast by default:
+        load_seasons=False
 
-    Set load_seasons=True only when the caller explicitly needs season
-    discovery.
+    Use load_seasons=True only when full season
+    aggregation is required.
     """
 
-    query = clean_text(query)
+    query = clean_text(
+        query
+    )
 
     if not query:
         return None
 
-    # --------------------------------------------------------
-    # CACHE
-    # --------------------------------------------------------
-
-    cached = _get_cached_info(query)
+    cached = _get_cached_info(
+        query
+    )
 
     if cached is not None:
         return cached
 
-    # --------------------------------------------------------
-    # SEARCH
-    # --------------------------------------------------------
-
-    results = search_rareanimes(query)
-
-    if not results:
-        return None
-
-    # --------------------------------------------------------
-    # BEST MATCH
-    # --------------------------------------------------------
+    # Search RareAnimes.
+    results = search_rareanimes(
+        query
+    )
 
     best = choose_best_result(
         query,
@@ -2076,10 +2764,6 @@ def get_anime_info(
     if not best:
         return None
 
-    # --------------------------------------------------------
-    # MAIN PAGE ONLY
-    # --------------------------------------------------------
-
     info = parse_anime_page(
         best["url"],
         query,
@@ -2088,26 +2772,50 @@ def get_anime_info(
     if not info:
         return None
 
-    # --------------------------------------------------------
-    # OPTIONAL SEASON LOADING
-    # --------------------------------------------------------
+    # Keep the search result confidence.
+    info.confidence = float(
+        best.get(
+            "score",
+            info.confidence,
+        )
+    )
 
+    info.matched_title = (
+        best.get(
+            "title"
+        )
+        or info.matched_title
+    )
+
+    # Prefer clean anime title when possible.
+    # Remove common RareAnimes upload suffixes.
+    display_name = clean_anime_title(
+        info.name
+    )
+
+    if display_name:
+        info.name = display_name
+
+    # Load additional seasons only when explicitly requested.
     if load_seasons:
         info = load_additional_seasons(
             info
         )
 
-    # --------------------------------------------------------
-    # FINALIZE
-    # --------------------------------------------------------
-
     info = finalize_info(
         info
     )
 
-    # --------------------------------------------------------
-    # CACHE
-        # --------------------------------------------------------
+    # Apply current schedule fallback after
+    # normal parsing so it can override incorrect
+    # upload-count based episode totals.
+    info = apply_current_schedule(
+        info
+    )
+
+    info = finalize_info(
+        info
+    )
 
     _set_cached_info(
         query,
@@ -2118,25 +2826,72 @@ def get_anime_info(
 
 
 # ============================================================
+# TITLE CLEANUP
+# ============================================================
+
+def clean_anime_title(
+    title: str,
+) -> str:
+
+    if not title:
+        return ""
+
+    value = clean_text(
+        title
+    )
+
+    # Remove common upload-page suffixes.
+    patterns = [
+        r"\s+Hindi\s+Dubbed\s+Episodes?.*$",
+        r"\s+Hindi\s+Dubbed.*$",
+        r"\s+Episodes?\s+Download.*$",
+        r"\s+Download\s+HD.*$",
+        r"\s+All\s+Episodes?.*$",
+        r"\s+Season\s+\d+\s+Hindi.*$",
+    ]
+
+    for pattern in patterns:
+
+        value = re.sub(
+            pattern,
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+    return clean_text(
+        value
+    )
+
+
+# ============================================================
 # DICT API
 # ============================================================
 
 def get_anime_info_dict(
     query: str,
-) -> Optional[Dict[str, Any]]:
+    load_seasons: bool = False,
+) -> Optional[
+    Dict[str, Any]
+]:
 
     info = get_anime_info(
-        query
+        query,
+        load_seasons=load_seasons,
     )
 
-    if not info:
+    if info is None:
         return None
 
-    return info.to_dict()
+    data = asdict(
+        info
+    )
+
+    return data
 
 
 # ============================================================
-# TELEGRAM MESSAGE FORMATTER
+# FORMATTER
 # ============================================================
 
 def format_anime_info(
@@ -2145,11 +2900,11 @@ def format_anime_info(
 
     lines = []
 
-    # --------------------------------------------------------
-    # NAME
-    # --------------------------------------------------------
-
-    name = info.name or "Unknown"
+    name = (
+        info.name
+        or info.original_name
+        or "Unknown"
+    )
 
     lines.append(
         f"🎬 Anime: {name}"
@@ -2157,26 +2912,29 @@ def format_anime_info(
 
     lines.append("")
 
-    # --------------------------------------------------------
-    # HINDI DUB
-    # --------------------------------------------------------
+    if info.hindi_status_known:
 
-    if info.hindi_dub:
-        hindi_text = "🇮🇳 Hindi Dub: ✅ Available"
+        if info.hindi_dub:
+            hindi_text = (
+                "🇮🇳 Hindi Dub: "
+                "✅ Available"
+            )
+        else:
+            hindi_text = (
+                "🇮🇳 Hindi Dub: "
+                "❌ Not Available"
+            )
 
-    elif info.hindi_status_known:
-        hindi_text = "🇮🇳 Hindi Dub: ❌ Not Available"
+        lines.append(
+            hindi_text
+        )
 
     else:
-        hindi_text = "🇮🇳 Hindi Dub: ⚠️ Unknown"
 
-    lines.append(
-        hindi_text
-    )
-
-    # --------------------------------------------------------
-    # PLATFORM
-    # --------------------------------------------------------
+        lines.append(
+            "🇮🇳 Hindi Dub: "
+            "❓ Unknown"
+        )
 
     if info.platform:
 
@@ -2187,65 +2945,38 @@ def format_anime_info(
             )
         )
 
-    # --------------------------------------------------------
-    # SEASON
-    # --------------------------------------------------------
-
     if info.season is not None:
 
         lines.append(
-            f"📀 Season: {info.season}"
+            f"📀 Season: "
+            f"{info.season}"
         )
 
-    elif len(info.seasons) == 1:
+    if (
+        info.status == "Ongoing"
+        and info.total_episodes is not None
+        and info.last_episode is not None
+    ):
 
         lines.append(
-            f"📀 Season: {info.seasons[0]}"
+            "🎬 Episodes: "
+            f"{info.last_episode} / "
+            f"{info.total_episodes}"
         )
 
-    elif info.seasons:
-
-        season_text = ", ".join(
-            f"Season {x}"
-            for x in info.seasons
-        )
+    elif info.total_episodes is not None:
 
         lines.append(
-            f"📀 Seasons: {season_text}"
+            "🎬 Episodes: "
+            f"{info.total_episodes}"
         )
-
-    # --------------------------------------------------------
-    # EPISODES
-    # --------------------------------------------------------
-
-    if info.status == "Ongoing":
-
-        if (
-            info.last_episode is not None
-            and info.total_episodes is not None
-        ):
-            lines.append(
-                f"🎬 Episodes: "
-                f"{info.last_episode} / "
-                f"{info.total_episodes}"
-            )
-
-        elif info.last_episode is not None:
-
-            lines.append(
-                f"🎬 Episodes: "
-                f"{info.last_episode} released"
-            )
 
     elif info.episodes is not None:
 
         lines.append(
-            f"🎬 Episodes: {info.episodes}"
+            "🎬 Episodes: "
+            f"{info.episodes}"
         )
-
-    # --------------------------------------------------------
-    # LANGUAGES
-    # --------------------------------------------------------
 
     if info.languages:
 
@@ -2258,110 +2989,94 @@ def format_anime_info(
             )
         )
 
-    # --------------------------------------------------------
-    # STATUS
-    # --------------------------------------------------------
-
     lines.append("")
 
-    if info.status == "Completed":
+    if info.status == "Ongoing":
 
-        lines.append(
-            "📊 Status: ✅ Completed"
+        status_text = (
+            "📊 Status: 🔴 Ongoing"
         )
 
-    elif info.status == "Ongoing":
+    elif info.status == "Completed":
 
-        lines.append(
-            "📊 Status: 🔴 Ongoing"
+        status_text = (
+            "📊 Status: ✅ Completed"
         )
 
     else:
 
-        lines.append(
-            "📊 Status: ⚪ Unknown"
+        status_text = (
+            "📊 Status: ❓ Unknown"
         )
 
-    # --------------------------------------------------------
-    # LAST EPISODE
-    # --------------------------------------------------------
+    lines.append(
+        status_text
+    )
 
     if info.last_episode is not None:
 
         lines.append("")
 
         lines.append(
-            f"📅 Last Episode: "
-            f"Episode {info.last_episode}"
+            "📅 Last Episode: "
+            f"Episode "
+            f"{info.last_episode}"
         )
 
     if info.last_release:
 
         lines.append(
-            f"🗓 Last Release: "
+            "🗓 Last Release: "
             f"{info.last_release}"
         )
 
-    # --------------------------------------------------------
-    # NEXT EPISODE
-    # --------------------------------------------------------
+    if info.status == "Ongoing":
 
-    if (
-        info.status == "Ongoing"
-        and info.next_episode is not None
-    ):
+        if info.next_episode is not None:
 
-        lines.append("")
+            lines.append("")
 
-        lines.append(
-            f"⏭ Next Episode: "
-            f"Episode {info.next_episode}"
-        )
+            lines.append(
+                "⏭ Next Episode: "
+                f"Episode "
+                f"{info.next_episode}"
+            )
 
         if info.expected_release:
 
             lines.append(
-                f"📅 Expected Release: "
+                "📅 Expected Release: "
                 f"{info.expected_release}"
             )
 
         if info.schedule:
 
             lines.append(
-                f"⏰ Schedule: "
+                "⏰ Schedule: "
                 f"{info.schedule}"
             )
-
-    # --------------------------------------------------------
-    # STUDIO
-    # --------------------------------------------------------
 
     if info.studio:
 
         lines.append("")
 
         lines.append(
-            f"🏢 Studio: {info.studio}"
+            "🏢 Studio: "
+            f"{info.studio}"
         )
-
-    # --------------------------------------------------------
-    # DUB BY
-    # --------------------------------------------------------
 
     if info.dub_by:
 
         lines.append(
-            f"🎙 Dub By: {info.dub_by}"
+            "🎙 Dub By: "
+            f"{info.dub_by}"
         )
-
-    # --------------------------------------------------------
-    # SOURCE
-    # --------------------------------------------------------
 
     lines.append("")
 
     lines.append(
-        f"🔎 Source: {info.source}"
+        "🔎 Source: "
+        f"{SOURCE_NAME}"
     )
 
     return "\n".join(
@@ -2370,92 +3085,636 @@ def format_anime_info(
 
 
 # ============================================================
-# SAFE SEARCH FUNCTION
+# SIMPLE SEARCH API
 # ============================================================
 
 def search_anime(
     query: str,
+    load_seasons: bool = False,
 ) -> Optional[str]:
 
-    try:
+    info = get_anime_info(
+        query,
+        load_seasons=load_seasons,
+    )
 
-        info = get_anime_info(
-            query,
-            load_seasons=True,
+    if info is None:
+
+        return (
+            "😕 Anime not found: "
+            f"{clean_text(query)}\n\n"
+            "Try:\n"
+            "• Another spelling\n"
+            "• English title\n"
+            "• Short/common title\n"
+            "• Add Movie if it is a movie"
         )
 
-        if not info:
-            return None
-
-        return format_anime_info(
-            info
-        )
-
-    except Exception:
-        # Never crash the Telegram bot because
-        # scraper failed.
-        return None
+    return format_anime_info(
+        info
+    )
 
 
 # ============================================================
-# JSON DEBUG / API
+# JSON API
 # ============================================================
 
 def anime_to_json(
     query: str,
-) -> Optional[str]:
+    load_seasons: bool = False,
+) -> str:
 
-    info = get_anime_info(
-        query
+    data = get_anime_info_dict(
+        query,
+        load_seasons=load_seasons,
     )
 
-    if not info:
-        return None
+    if data is None:
+
+        return json.dumps(
+            {
+                "success": False,
+                "query": query,
+                "error": "Anime not found",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     return json.dumps(
-        info.to_dict(),
+        {
+            "success": True,
+            "data": data,
+        },
         ensure_ascii=False,
         indent=2,
     )
 
 
 # ============================================================
-# SIMPLE CLI TEST
+# CLI
 # ============================================================
 
 if __name__ == "__main__":
 
     import sys
 
-    if len(sys.argv) < 2:
+    query = " ".join(
+        sys.argv[1:]
+    ).strip()
+
+    if not query:
 
         print(
-            "Usage: python anime_scraper.py \"Naruto\""
+            "Usage: "
+            "python anime_scraper.py "
+            "\"anime name\""
         )
 
         raise SystemExit(0)
-
-    query = " ".join(
-        sys.argv[1:]
-    )
-
-    print(
-        "Searching:",
-        query,
-    )
 
     result = search_anime(
         query
     )
 
-    if result:
+    print(
+        result
+    )
+    # ============================================================
+# PART 6/7 — EXTRA API + CACHE HELPERS
+# ============================================================
 
-        print()
-        print(result)
+def clear_anime_cache() -> None:
+    """Clear the in-memory anime cache."""
+    _INFO_CACHE.clear()
 
-    else:
+
+def get_cache_size() -> int:
+    """Return number of cached anime queries."""
+    return len(_INFO_CACHE)
+
+
+def refresh_anime_info(
+    query: str,
+    load_seasons: bool = False,
+) -> Optional[AnimeInfo]:
+    """
+    Force a fresh lookup by removing the old cached result.
+    """
+
+    key = _cache_key(query)
+
+    _INFO_CACHE.pop(
+        key,
+        None,
+    )
+
+    return get_anime_info(
+        query,
+        load_seasons=load_seasons,
+    )
+
+
+# ============================================================
+# SEASON DETAILS API
+# ============================================================
+
+def get_anime_seasons(
+    query: str,
+) -> List[int]:
+
+    info = get_anime_info(
+        query,
+        load_seasons=True,
+    )
+
+    if not info:
+        return []
+
+    seasons = list(
+        info.seasons
+    )
+
+    if (
+        info.season is not None
+        and info.season not in seasons
+    ):
+        seasons.append(
+            info.season
+        )
+
+    return sorted(
+        set(seasons)
+    )
+
+
+# ============================================================
+# POSTER API
+# ============================================================
+
+def get_anime_poster(
+    query: str,
+) -> Optional[str]:
+
+    info = get_anime_info(
+        query,
+        load_seasons=False,
+    )
+
+    if not info:
+        return None
+
+    return info.poster
+
+
+# ============================================================
+# NORMALIZED SEARCH NAME
+# ============================================================
+
+def get_matched_title(
+    query: str,
+) -> Optional[str]:
+
+    info = get_anime_info(
+        query,
+        load_seasons=False,
+    )
+
+    if not info:
+        return None
+
+    return (
+        info.name
+        or info.original_name
+        or info.matched_title
+    )
+
+
+# ============================================================
+# SAFE SEARCH RESULT
+# ============================================================
+
+def is_valid_anime_info(
+    info: Optional[AnimeInfo],
+) -> bool:
+
+    if not info:
+        return False
+
+    if not (
+        info.name
+        or info.original_name
+        or info.matched_title
+    ):
+        return False
+
+    if (
+        info.source_url
+        and not is_our_domain(
+            info.source_url
+        )
+    ):
+        return False
+
+    return True
+
+
+# ============================================================
+# BULK SEARCH
+# ============================================================
+
+def search_multiple_anime(
+    queries: List[str],
+) -> Dict[
+    str,
+    Optional[AnimeInfo]
+]:
+
+    output = {}
+
+    cleaned = []
+
+    for query in queries:
+
+        query = clean_text(
+            query
+        )
+
+        if (
+            query
+            and query not in cleaned
+        ):
+            cleaned.append(
+                query
+            )
+
+    if not cleaned:
+        return output
+
+    def worker(
+        query: str,
+    ):
+
+        try:
+
+            return (
+                query,
+                get_anime_info(
+                    query
+                ),
+            )
+
+        except Exception:
+
+            return (
+                query,
+                None,
+            )
+
+    with ThreadPoolExecutor(
+        max_workers=min(
+            6,
+            len(cleaned),
+        )
+    ) as executor:
+
+        futures = [
+            executor.submit(
+                worker,
+                query,
+            )
+            for query in cleaned
+        ]
+
+        for future in as_completed(
+            futures
+        ):
+
+            try:
+
+                query, info = (
+                    future.result()
+                )
+
+                output[
+                    query
+                ] = info
+
+            except Exception:
+                continue
+
+    return output
+
+
+# ============================================================
+# DEBUG INFORMATION
+# ============================================================
+
+def debug_anime_search(
+    query: str,
+) -> Dict[str, Any]:
+
+    variants = query_variants(
+        query
+    )
+
+    results = search_rareanimes(
+        query
+    )
+
+    best = choose_best_result(
+        query,
+        results,
+    )
+
+    return {
+        "query": query,
+        "variants": variants,
+        "results": results,
+        "best": best,
+    }
+
+
+# ============================================================
+# ERROR-SAFE SEARCH
+# ============================================================
+
+def safe_get_anime_info(
+    query: str,
+    load_seasons: bool = False,
+) -> Optional[AnimeInfo]:
+
+    try:
+
+        return get_anime_info(
+            query,
+            load_seasons=load_seasons,
+        )
+
+    except Exception:
+        return None
+
+
+# ============================================================
+# FORMAT DICT
+# ============================================================
+
+def format_anime_dict(
+    data: Optional[
+        Dict[str, Any]
+    ],
+) -> str:
+
+    if not data:
+        return (
+            "😕 Anime not found."
+        )
+
+    try:
+
+        info = AnimeInfo(
+            **{
+                key: value
+                for key, value in data.items()
+                if key in AnimeInfo.__dataclass_fields__
+            }
+        )
+
+        return format_anime_info(
+            info
+        )
+
+    except Exception:
+
+        name = data.get(
+            "name",
+            "Unknown",
+        )
+
+        return (
+            f"🎬 Anime: {name}"
+        )
+
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+def scraper_health_check() -> bool:
+
+    try:
+
+        page = fetch(
+            BASE_URL,
+            timeout=5,
+        )
+
+        return bool(
+            page
+        )
+
+    except Exception:
+        return False
+        # ============================================================
+# PART 7/7 — FINAL PUBLIC FUNCTIONS
+# ============================================================
+
+def lookup_anime(
+    query: str,
+) -> Optional[AnimeInfo]:
+    """
+    Simple public lookup function.
+
+    Use this from bot.py / commands.py.
+    """
+
+    return safe_get_anime_info(
+        query,
+        load_seasons=False,
+    )
+
+
+def lookup_anime_full(
+    query: str,
+) -> Optional[AnimeInfo]:
+    """
+    Full lookup including season pages.
+    """
+
+    return safe_get_anime_info(
+        query,
+        load_seasons=True,
+    )
+
+
+def lookup_anime_dict(
+    query: str,
+) -> Optional[Dict[str, Any]]:
+
+    info = lookup_anime(
+        query
+    )
+
+    if not info:
+        return None
+
+    return asdict(
+        info
+    )
+
+
+def lookup_anime_text(
+    query: str,
+) -> str:
+
+    info = lookup_anime(
+        query
+    )
+
+    if not info:
+
+        return (
+            "😕 Anime not found: "
+            f"{clean_text(query)}\n\n"
+            "Try:\n"
+            "• Another spelling\n"
+            "• English title\n"
+            "• Short/common title\n"
+            "• Add Movie if it is a movie"
+        )
+
+    return format_anime_info(
+        info
+    )
+
+
+# ============================================================
+# COMPATIBILITY ALIASES
+# ============================================================
+
+# Older bot code can use these names.
+
+get_anime = lookup_anime
+
+get_anime_details = lookup_anime
+
+get_anime_data = lookup_anime_dict
+
+get_anime_text = lookup_anime_text
+
+
+# ============================================================
+# MODULE EXPORTS
+# ============================================================
+
+__all__ = [
+    "AnimeInfo",
+    "get_anime_info",
+    "get_anime_info_dict",
+    "format_anime_info",
+    "search_anime",
+    "anime_to_json",
+    "lookup_anime",
+    "lookup_anime_full",
+    "lookup_anime_dict",
+    "lookup_anime_text",
+    "get_anime",
+    "get_anime_details",
+    "get_anime_data",
+    "get_anime_text",
+    "get_anime_seasons",
+    "get_anime_poster",
+    "get_matched_title",
+    "search_multiple_anime",
+    "refresh_anime_info",
+    "clear_anime_cache",
+    "get_cache_size",
+    "scraper_health_check",
+]
+
+
+# ============================================================
+# COMMAND LINE TEST
+# ============================================================
+
+def main() -> None:
+
+    import sys
+
+    args = sys.argv[1:]
+
+    if not args:
 
         print(
-            "Anime not found or source unavailable."
-)
-        
+            "Usage:"
+        )
+
+        print(
+            "python anime_scraper.py "
+            "\"anime name\""
+        )
+
+        print()
+
+        print(
+            "Examples:"
+        )
+
+        print(
+            "python anime_scraper.py bleach"
+        )
+
+        print(
+            "python anime_scraper.py konosuba"
+        )
+
+        print(
+            "python anime_scraper.py "
+            "\"re zero\""
+        )
+
+        return
+
+    query = " ".join(
+        args
+    ).strip()
+
+    started = time.perf_counter()
+
+    info = lookup_anime(
+        query
+    )
+
+    elapsed = (
+        time.perf_counter()
+        - started
+    )
+
+    if not info:
+
+        print(
+            "😕 Anime not found: "
+            f"{query}"
+        )
+
+        print(
+            f"\nSearch time: "
+            f"{elapsed:.2f}s"
+        )
+
+        return
+
+    print(
+        format_anime_info(
+            info
+        )
+    )
+
+    print(
+        f"\nSearch time: "
+        f"{elapsed:.2f}s"
+    )
+
+
+if __name__ == "__main__":
+    main()
