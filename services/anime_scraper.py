@@ -637,34 +637,34 @@ async def fetch_cached(
 # PART 3/7 — SEARCH + TITLE RESOLVER (CONTINUED)
 # ============================================================
     original_html = await fetch_cached(
-            session,
-            original_url,
-            ttl=ONGOING_CACHE_TTL
-        )
+        session,
+        original_url,
+        ttl=ONGOING_CACHE_TTL
+    )
 
     original_candidates = parse_search_results(
-            original_html,
-            query
-        )
+        original_html,
+        query
+    )
 
     candidates.extend(
-            original_candidates
-        )
+        original_candidates
+    )
 
-        # Remove duplicate URLs
-        unique = {}
+    # Remove duplicate URLs
+    unique = {}
 
-        for candidate in candidates:
-            unique[candidate.url] = candidate
+    for candidate in candidates:
+        unique[candidate.url] = candidate
 
-        candidates = list(
-            unique.values()
-        )
+    candidates = list(
+        unique.values()
+    )
 
-        candidates.sort(
-            key=lambda x: x.score,
-            reverse=True
-        )
+    candidates.sort(
+        key=lambda x: x.score,
+        reverse=True
+    )
 
     logger.info(
         "Search results for %r: %d",
