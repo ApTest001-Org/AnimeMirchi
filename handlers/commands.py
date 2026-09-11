@@ -210,7 +210,7 @@ async def anime_command(
         # Fetch information from anime_scraper.py
         # ----------------------------------------------------
 
-        anime_info = get_anime_info(anime_name)
+        anime_info = await get_anime_info(anime_name)
 
         # ----------------------------------------------------
         # Delete loading message
@@ -299,7 +299,7 @@ async def send_anime_with_poster(
         # ----------------------------------------------------
 
         if isinstance(anime_info, AnimeInfo):
-            poster_url = anime_info.poster
+            poster_url = anime_info.poster_url
 
             # Use scraper's official formatter.
             caption = format_anime_info(anime_info)
@@ -587,3 +587,4 @@ def _safe_text(
     value = str(value).strip()
 
     return value if value else default
+    
