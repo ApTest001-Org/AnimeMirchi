@@ -1631,7 +1631,7 @@ async def search_anime(
              session,
              search_url
         )
-            )
+            
 
             if not html:
                 continue
