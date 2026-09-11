@@ -339,17 +339,14 @@ async def send_anime_with_poster(
 
         if poster_url and _is_valid_url(poster_url):
             try:
+                # Send poster separately; information is sent below.
                 await update.message.reply_photo(
-                    photo=poster_url,
-                    caption=caption,
+                    photo=poster_url
                 )
 
                 logger.debug(
-                    f"Anime poster sent successfully: "
-                    f"{poster_url}"
+                    "Anime poster sent successfully."
                 )
-
-                return
 
             except Exception as exc:
                 logger.warning(
@@ -357,11 +354,34 @@ async def send_anime_with_poster(
                 )
 
         # ----------------------------------------------------
-        # Text fallback
+        # Send full anime information
+        # Split long results to stay within Telegram's limit.
         # ----------------------------------------------------
 
-        await update.message.reply_text(
-            caption
+        while caption:
+            if len(caption) <= 4000:
+                await update.message.reply_text(caption)
+                break
+
+            split_at = caption.rfind(
+                "\n",
+                0,
+                4000
+            )
+
+            if split_at <= 0:
+                split_at = 4000
+
+            await update.message.reply_text(
+                caption[:split_at]
+            )
+
+            caption = caption[
+                split_at:
+            ].lstrip()
+
+        logger.debug(
+            "Anime information sent successfully."
         )
 
         logger.debug(
@@ -587,4 +607,5 @@ def _safe_text(
     value = str(value).strip()
 
     return value if value else default
+
     
